@@ -1,0 +1,8 @@
+android.defaultConfig {
+    minSdkVersion Math.max(minSdkVersion?.apiLevel ?: 15, 19)
+}
+ext["minSdkVersion"] = Math.max(ext.find("minSdkVersion")?:15, 19)
+
+dependencies {
+    implementation 'com.unity3d.ads:unity-ads:4.0.1'
+}

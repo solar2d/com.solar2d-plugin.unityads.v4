@@ -1,0 +1,6 @@
+.gradle/
+**xcuser**
+/ios/BuiltPlugin
+build/
+ios/libUnityAdsPlugin.a
+.idea/
