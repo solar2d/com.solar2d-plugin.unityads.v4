@@ -3,7 +3,7 @@
 local Library = require "CoronaLibrary"
 
 -- Create library
-local lib = Library:new{ name="plugin.unityads,v4", publisherId="com.solar2d", version=1 }
+local lib = Library:new{ name="plugin.unityads.v4", publisherId="com.solar2d", version=1 }
 
 -------------------------------------------------------------------------------
 -- BEGIN
