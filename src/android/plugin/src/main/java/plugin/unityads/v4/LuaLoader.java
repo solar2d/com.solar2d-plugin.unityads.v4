@@ -90,7 +90,7 @@ public class LuaLoader implements JavaFunction, CoronaRuntimeListener {
     private static final String WARNING_MSG = "WARNING: ";
 
     private static String functionSignature = "";                                  // used in error reporting functions
-
+    //keep track of loadedIds
     private static List<String> loadedIds = new ArrayList<>();
 
     // -------------------------------------------------------------------
@@ -209,7 +209,8 @@ public class LuaLoader implements JavaFunction, CoronaRuntimeListener {
      */
     @Override
     public void onExiting(CoronaRuntime runtime) {
-        //CoronaLua.deleteRef(runtime.getLuaState(), coronaListener);
+        loadedIds.clear();
+        CoronaLua.deleteRef(runtime.getLuaState(), coronaListener);
         coronaListener = CoronaLua.REFNIL;
         coronaRuntimeTaskDispatcher = null;
 
@@ -383,10 +384,7 @@ public class LuaLoader implements JavaFunction, CoronaRuntimeListener {
             if (coronaActivity != null) {
                 Runnable runnableActivity = new Runnable() {
                     public void run() {
-                        if (!UnityAds.isInitialized()) {
-                            UnityAds.initialize(coronaActivity, fGameId, fTestMode, new CoronaUnityAdsDelegate());
-                        }
-
+                        UnityAds.initialize(coronaActivity, fGameId, fTestMode, new CoronaUnityAdsDelegate());
                     }
                 };
 
@@ -507,7 +505,6 @@ public class LuaLoader implements JavaFunction, CoronaRuntimeListener {
                     @Override
                     public void run() {
                         CoronaUnityAdsDelegate listener = (CoronaUnityAdsDelegate) new CoronaUnityAdsDelegate();
-
                         UnityAds.load(fPlacementId, listener);
                     }
                 });

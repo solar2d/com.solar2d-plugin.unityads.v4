@@ -36,7 +36,7 @@ local setGreen = function(self)
 end
 
 local subTitle = display.newText {
-    text = "plugin for Corona SDK",
+    text = "plugin for Solar2d SDK",
     font = display.systemFont,
     fontSize = 14
 }
@@ -118,8 +118,18 @@ local showVideoButton = widget.newButton {
     labelColor = { default={ 0, 0, 0 }, over={ 0.7, 0.7, 0.7 } },
     onRelease = function(event)
         setRed(vReady)
-        unityads.load("video")
         unityads.show("video")
+        --unityads.setHasUserConsent(true)
+    end
+}
+
+local loadVideoButton = widget.newButton {
+    label = "Load",
+    width = 100,
+    height = 40,
+    labelColor = { default={ 0, 0, 0 }, over={ 0.7, 0.7, 0.7 } },
+    onRelease = function(event)
+        unityads.load("video")
         --unityads.setHasUserConsent(true)
     end
 }
@@ -141,8 +151,17 @@ local showRewardedButton = widget.newButton {
     labelColor = { default={ 0, 0, 0 }, over={ 0.7, 0.7, 0.7 } },
     onRelease = function(event)
         setRed(rReady)
-        unityads.load("rewardedVideo")
         unityads.show("rewardedVideo")
+    end
+}
+local loadRewardedButton = widget.newButton {
+    label = "Load",
+    width = 100,
+    height = 40,
+    labelColor = { default={ 0, 0, 0 }, over={ 0.7, 0.7, 0.7 } },
+    onRelease = function(event)
+        unityads.load("rewardedVideo")
+        --unityads.setHasUserConsent(true)
     end
 }
 
@@ -175,6 +194,7 @@ local layoutDisplayObjects = function(orientation)
         eventDataTextBox.y = 2000
     end
 
+
     videoBG.x, videoBG.y = display.contentCenterX, 140
     videoBG:setFillColor(0,0.7)
 
@@ -185,20 +205,27 @@ local layoutDisplayObjects = function(orientation)
     vReady.y = 140
     setRed(vReady)
 
-    showVideoButton.x = display.contentCenterX
+    showVideoButton.x = display.contentCenterX+40
     showVideoButton.y = videoLabel.y + 40
+
+    loadVideoButton.x = display.contentCenterX-40
+    loadVideoButton.y = showVideoButton.y
 
     rewardedBG.x, rewardedBG.y = display.contentCenterX, 220
 
     rewardedLabel.x = display.contentCenterX
     rewardedLabel.y = 220
 
+
     rReady.x = display.contentCenterX + 140
     rReady.y = 220
     setRed(rReady)
 
-    showRewardedButton.x = display.contentCenterX
+    showRewardedButton.x = display.contentCenterX+40
     showRewardedButton.y = rewardedLabel.y + 40
+
+    loadRewardedButton.x = display.contentCenterX-40
+    loadRewardedButton.y = showRewardedButton.y
 end
 
 -- initial layout
