@@ -29,7 +29,7 @@
 // ----------------------------------------------------------------------------
 
 #define PLUGIN_NAME        "plugin.unityads.v4"
-#define PLUGIN_VERSION     "1.0.0"
+#define PLUGIN_VERSION     "1.0.1"
 #define PLUGIN_SDK_VERSION [UnityAds getVersion]
 
 static const char EVENT_NAME[]    = "adsRequest";
@@ -889,6 +889,7 @@ UnityAdsPlugin::setPrivacyMode(lua_State *L)
     NSDictionary *coronaEvent = @{
       @(CoronaEventPhaseKey()) : PHASE_INIT,
       @(CoronaEventResponseKey()) : message,
+      @(CoronaEventIsErrorKey()) : @(true),
       CORONA_EVENT_DATA_KEY : [self getJSONStringForPlacement:nil error:error errorType:@"init"]
     };
     [unityadsDelegate dispatchLuaEvent:coronaEvent];

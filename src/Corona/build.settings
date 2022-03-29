@@ -28,6 +28,6 @@ settings =
 
 	plugins =
 	{
-		["plugin.unityads"] = { publisherId = "com.coronalabs" }
+		["plugin.unityads.v4"] = { publisherId = "com.solar2d" }
 	}
 }

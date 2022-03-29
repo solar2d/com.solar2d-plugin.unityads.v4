@@ -17,7 +17,7 @@ The Unity Ads plugin allows developers to monetize users through Unity Ads video
 
 This documentation is for the new Unity Ads SDK(v4), click to view the [Unity Ads legacy plugin][plugin.unityads]
 
-Notable changes from old plugin include now needing to load placement IDs via [unityads.load()][plugin.unityads-v4.load] and the `placementStatus` [event.phase][plugin.unityads-v4.event.adsRequest.phase] removal.
+Notable changes from old plugin include now needing to load placement IDs via [unityads.load()][plugin.unityads-v4.load] and the `placementStatus` [event.phase][plugin.unityads-v4.event.adsRequest.phase] removal. Also [event.phase][plugin.unityads-v4.event.adsRequest.phase] `init` may take a longer and can return  [event.isError][plugin.unityads-v4.event.adsRequest.isError] and [event.response][plugin.unityads-v4.event.adsRequest.response]
 
 On a per-app basis, the first time a Unity ad appears, the user will see a banner with the option to opt-out of behaviorally targeted advertising. Thereafter, the user can click an information button to receive the opt-out again. Although UnityAds will automatically present users with an opportunity to opt-out of targeted advertising, with no implementation needed from the publisher, check out new `setHasUserConsent` method to enable manual GDPR data collection restrictions.
 
