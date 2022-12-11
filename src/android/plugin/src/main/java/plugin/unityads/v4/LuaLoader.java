@@ -4,40 +4,34 @@
 
 package plugin.unityads.v4;
 
-import com.naef.jnlua.LuaState;
-import com.naef.jnlua.JavaFunction;
-import com.naef.jnlua.LuaType;
-import com.naef.jnlua.NamedJavaFunction;
-
-import com.ansca.corona.CoronaLua;
-import com.ansca.corona.CoronaLuaEvent;
-import com.ansca.corona.CoronaRuntimeTask;
-import com.ansca.corona.CoronaRuntimeTaskDispatcher;
-import com.ansca.corona.CoronaActivity;
-import com.ansca.corona.CoronaEnvironment;
-import com.ansca.corona.CoronaRuntime;
-import com.ansca.corona.CoronaRuntimeListener;
-
 import android.util.Log;
 import android.view.View;
 
-import org.json.JSONObject;
-
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.HashMap;
-import java.util.Iterator;
-import java.util.List;
-import java.util.ListIterator;
-import java.util.Map;
-
-// Plugin imports
+import com.ansca.corona.CoronaActivity;
+import com.ansca.corona.CoronaEnvironment;
+import com.ansca.corona.CoronaLua;
+import com.ansca.corona.CoronaLuaEvent;
+import com.ansca.corona.CoronaRuntime;
+import com.ansca.corona.CoronaRuntimeListener;
+import com.ansca.corona.CoronaRuntimeTask;
+import com.ansca.corona.CoronaRuntimeTaskDispatcher;
+import com.naef.jnlua.JavaFunction;
+import com.naef.jnlua.LuaState;
+import com.naef.jnlua.LuaType;
+import com.naef.jnlua.NamedJavaFunction;
 import com.unity3d.ads.IUnityAdsInitializationListener;
 import com.unity3d.ads.IUnityAdsLoadListener;
 import com.unity3d.ads.IUnityAdsShowListener;
 import com.unity3d.ads.UnityAds;
 import com.unity3d.ads.metadata.MetaData;
 import com.unity3d.services.banners.IUnityBannerListener;
+
+import org.json.JSONObject;
+
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 
 /**
  * Implements the Lua interface for the UnityAds plugin.
@@ -91,7 +85,7 @@ public class LuaLoader implements JavaFunction, CoronaRuntimeListener {
 
     private static String functionSignature = "";                                  // used in error reporting functions
     //keep track of loadedIds
-    private static List<String> loadedIds = new ArrayList<>();
+    private static final List<String> loadedIds = new ArrayList<>();
 
     // -------------------------------------------------------------------
     // Plugin lifecycle events
@@ -307,91 +301,93 @@ public class LuaLoader implements JavaFunction, CoronaRuntimeListener {
          * @return Returns the number of values to be returned by the Lua function.
          */
         @Override
-        public int invoke(final LuaState luaState) {
-            // set function signature for error / warning messages
-            functionSignature = "unityads.init(listener, options)";
+        public int invoke(final LuaState luaState)  {
+            synchronized (loadedIds) {
+                // set function signature for error / warning messages
+                functionSignature = "unityads.init(listener, options)";
 
-            // prevent init from being called twice
-            if (coronaListener != CoronaLua.REFNIL) {
-                logMsg(ERROR_MSG, "init() should only be called once");
-                return 0;
-            }
-
-            // check number of arguments passed
-            int nargs = luaState.getTop();
-            if (nargs != 2) {
-                logMsg(ERROR_MSG, "2 arguments expected. got " + nargs);
-                return 0;
-            }
-
-            String gameId = null;
-            boolean testMode = false;
-
-            // get listener (required)
-            if (CoronaLua.isListener(luaState, 1, PROVIDER_NAME)) {
-                coronaListener = CoronaLua.newRef(luaState, 1);
-            } else {
-                logMsg(ERROR_MSG, "listener function expected, got: " + luaState.typeName(1));
-                return 0;
-            }
-
-            // check for options table
-            if (luaState.type(2) == LuaType.TABLE) {
-                for (luaState.pushNil(); luaState.next(2); luaState.pop(1)) {
-                    String key = luaState.toString(-2);
-
-                    switch (key) {
-                        case "gameId":
-                            if (luaState.type(-1) == LuaType.STRING) {
-                                gameId = luaState.toString(-1);
-                            } else {
-                                logMsg(ERROR_MSG, "options.gameId expected (string). Got " + luaState.typeName(-1));
-                                return 0;
-                            }
-                            break;
-                        case "testMode":
-                            if (luaState.type(-1) == LuaType.BOOLEAN) {
-                                testMode = luaState.toBoolean(-1);
-                            } else {
-                                logMsg(ERROR_MSG, "options.testMode expected (boolean). Got " + luaState.typeName(-1));
-                                return 0;
-                            }
-                            break;
-                        default:
-                            logMsg(ERROR_MSG, "Invalid option '" + key + "'");
-                            return 0;
-                    }
+                // prevent init from being called twice
+                if (isSDKInitialized()) {
+                    logMsg(ERROR_MSG, "init() should only be called once");
+                    return 0;
                 }
-            } else {
-                logMsg(ERROR_MSG, "options table expected. Got " + luaState.typeName(2));
-                return 0;
-            }
 
-            // validation section
-            if (gameId == null) {
-                logMsg(ERROR_MSG, "options.gameId is required");
-                return 0;
-            }
+                // check number of arguments passed
+                int nargs = luaState.getTop();
+                if (nargs != 2) {
+                    logMsg(ERROR_MSG, "2 arguments expected. got " + nargs);
+                    return 0;
+                }
 
-            // log plugin version to the console
-            Log.i(CORONA_TAG, PLUGIN_NAME + ": " + PLUGIN_VERSION + " (SDK: " + PLUGIN_SDK_VERSION + ")");
+                String gameId = null;
+                boolean testMode = false;
 
-            // declare final variables for inner loop
-            final CoronaActivity coronaActivity = CoronaEnvironment.getCoronaActivity();
-            final String fGameId = gameId;
-            final boolean fTestMode = testMode;
+                // get listener (required)
+                if (CoronaLua.isListener(luaState, 1, PROVIDER_NAME)) {
+                    coronaListener = CoronaLua.newRef(luaState, 1);
+                } else {
+                    logMsg(ERROR_MSG, "listener function expected, got: " + luaState.typeName(1));
+                    return 0;
+                }
 
-            if (coronaActivity != null) {
-                Runnable runnableActivity = new Runnable() {
-                    public void run() {
-                        UnityAds.initialize(coronaActivity, fGameId, fTestMode, new CoronaUnityAdsDelegate());
+                // check for options table
+                if (luaState.type(2) == LuaType.TABLE) {
+                    for (luaState.pushNil(); luaState.next(2); luaState.pop(1)) {
+                        String key = luaState.toString(-2);
+
+                        switch (key) {
+                            case "gameId":
+                                if (luaState.type(-1) == LuaType.STRING) {
+                                    gameId = luaState.toString(-1);
+                                } else {
+                                    logMsg(ERROR_MSG, "options.gameId expected (string). Got " + luaState.typeName(-1));
+                                    return 0;
+                                }
+                                break;
+                            case "testMode":
+                                if (luaState.type(-1) == LuaType.BOOLEAN) {
+                                    testMode = luaState.toBoolean(-1);
+                                } else {
+                                    logMsg(ERROR_MSG, "options.testMode expected (boolean). Got " + luaState.typeName(-1));
+                                    return 0;
+                                }
+                                break;
+                            default:
+                                logMsg(ERROR_MSG, "Invalid option '" + key + "'");
+                                return 0;
+                        }
                     }
-                };
+                } else {
+                    logMsg(ERROR_MSG, "options table expected. Got " + luaState.typeName(2));
+                    return 0;
+                }
 
-                coronaActivity.runOnUiThread(runnableActivity);
+                // validation section
+                if (gameId == null) {
+                    logMsg(ERROR_MSG, "options.gameId is required");
+                    return 0;
+                }
+
+                // log plugin version to the console
+                Log.i(CORONA_TAG, PLUGIN_NAME + ": " + PLUGIN_VERSION + " (SDK: " + PLUGIN_SDK_VERSION + ")");
+
+                // declare final variables for inner loop
+                final CoronaActivity coronaActivity = CoronaEnvironment.getCoronaActivity();
+                final String fGameId = gameId;
+                final boolean fTestMode = testMode;
+
+                if (coronaActivity != null) {
+                    Runnable runnableActivity = new Runnable() {
+                        public void run() {
+                            UnityAds.initialize(coronaActivity, fGameId, fTestMode, new CoronaUnityAdsDelegate());
+                        }
+                    };
+
+                    coronaActivity.runOnUiThread(runnableActivity);
+                }
+
+                return 0;
             }
-
-            return 0;
         }
     }
 
@@ -425,9 +421,9 @@ public class LuaLoader implements JavaFunction, CoronaRuntimeListener {
             }
 
             // get number of arguments
-            int nargs = luaState.getTop();
-            if (nargs != 1) {
-                logMsg(ERROR_MSG, "Expected 1 argument, got " + nargs);
+            int nArgs = luaState.getTop();
+            if (nArgs != 1) {
+                logMsg(ERROR_MSG, "Expected 1 argument, got " + nArgs);
                 return 0;
             }
 
@@ -439,10 +435,7 @@ public class LuaLoader implements JavaFunction, CoronaRuntimeListener {
                 logMsg(ERROR_MSG, "placementId expected (string), got " + luaState.typeName(1));
                 return 0;
             }
-            boolean isLoaded = false;
-            if(loadedIds.contains(placementId)){
-                isLoaded = true;
-            }
+            boolean isLoaded = loadedIds.contains(placementId);
             luaState.pushBoolean(isLoaded);
 
             return 1;
@@ -504,7 +497,7 @@ public class LuaLoader implements JavaFunction, CoronaRuntimeListener {
                 coronaActivity.runOnUiThread(new Runnable() {
                     @Override
                     public void run() {
-                        CoronaUnityAdsDelegate listener = (CoronaUnityAdsDelegate) new CoronaUnityAdsDelegate();
+                        CoronaUnityAdsDelegate listener = new CoronaUnityAdsDelegate();
                         UnityAds.load(fPlacementId, listener);
                     }
                 });
@@ -560,10 +553,7 @@ public class LuaLoader implements JavaFunction, CoronaRuntimeListener {
                 return 0;
             }
 
-            boolean isLoaded = false;
-            if(loadedIds.contains(placementId)){
-                isLoaded = true;
-            }
+            boolean isLoaded = loadedIds.contains(placementId);
 
             // can't show unless ad is loaded
             if (!isLoaded) {
@@ -579,7 +569,7 @@ public class LuaLoader implements JavaFunction, CoronaRuntimeListener {
                 coronaActivity.runOnUiThread(new Runnable() {
                     @Override
                     public void run() {
-                        CoronaUnityAdsDelegate listener = (CoronaUnityAdsDelegate) new CoronaUnityAdsDelegate();
+                        CoronaUnityAdsDelegate listener = new CoronaUnityAdsDelegate();
 
                         UnityAds.show(coronaActivity, fPlacementId, listener);
                     }
@@ -684,7 +674,7 @@ public class LuaLoader implements JavaFunction, CoronaRuntimeListener {
                 return 0;
             }
 
-            String privacyMode = "none";
+            String privacyMode;
 
             // check options
             if (L.type(1) == LuaType.STRING) {
@@ -801,9 +791,7 @@ public class LuaLoader implements JavaFunction, CoronaRuntimeListener {
 
         @Override
         public void onUnityAdsFailedToLoad(String placementId, UnityAds.UnityAdsLoadError error, String message) {
-            if(loadedIds.contains(placementId)){
-                loadedIds.remove(placementId);
-            }
+            loadedIds.remove(placementId);
             Map<String, Object> coronaEvent = new HashMap<>();
             coronaEvent.put(EVENT_PHASE_KEY, PHASE_FAILED);
             coronaEvent.put(EVENT_TYPE_KEY, TYPE_UNITYAD);
@@ -815,9 +803,7 @@ public class LuaLoader implements JavaFunction, CoronaRuntimeListener {
 
         @Override
         public void onUnityAdsShowFailure(String placementId, UnityAds.UnityAdsShowError error, String message) {
-            if(loadedIds.contains(placementId)){
-                loadedIds.remove(placementId);
-            }
+            loadedIds.remove(placementId);
             Map<String, Object> coronaEvent = new HashMap<>();
             coronaEvent.put(EVENT_PHASE_KEY, PHASE_FAILED);
             coronaEvent.put(EVENT_TYPE_KEY, TYPE_UNITYAD);
@@ -829,9 +815,7 @@ public class LuaLoader implements JavaFunction, CoronaRuntimeListener {
 
         @Override
         public void onUnityAdsShowStart(String placementId) {
-            if(loadedIds.contains(placementId)){
-                loadedIds.remove(placementId);
-            }
+            loadedIds.remove(placementId);
             Map<String, Object> coronaEvent = new HashMap<>();
             coronaEvent.put(EVENT_PHASE_KEY, PHASE_DISPLAYED);
             coronaEvent.put(EVENT_TYPE_KEY, TYPE_UNITYAD);
@@ -851,9 +835,7 @@ public class LuaLoader implements JavaFunction, CoronaRuntimeListener {
 
         @Override
         public void onUnityAdsShowComplete(String placementId, UnityAds.UnityAdsShowCompletionState finishState) {
-            if(loadedIds.contains(placementId)){
-                loadedIds.remove(placementId);
-            }
+            loadedIds.remove(placementId);
             Map<String, Object> coronaEvent = new HashMap<>();
             coronaEvent.put(EVENT_TYPE_KEY, TYPE_UNITYAD);
             coronaEvent.put(EVENT_DATA_KEY, getJSONStringForPlacement(placementId));
@@ -884,16 +866,12 @@ public class LuaLoader implements JavaFunction, CoronaRuntimeListener {
 
         @Override
         public void onUnityBannerUnloaded(String placementId) {
-            if(loadedIds.contains(placementId)){
-                loadedIds.remove(placementId);
-            }
+            loadedIds.remove(placementId);
         }
 
         @Override
         public void onUnityBannerShow(String placementId) {
-            if(loadedIds.contains(placementId)){
-                loadedIds.remove(placementId);
-            }
+            loadedIds.remove(placementId);
         }
 
         @Override
