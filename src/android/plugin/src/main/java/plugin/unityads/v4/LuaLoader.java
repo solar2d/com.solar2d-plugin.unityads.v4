@@ -86,6 +86,8 @@ public class LuaLoader implements JavaFunction, CoronaRuntimeListener {
     private static String functionSignature = "";                                  // used in error reporting functions
     //keep track of loadedIds
     private static final List<String> loadedIds = new ArrayList<>();
+    private static boolean fInitSuccess = false;
+    private static boolean fInitStarted = false;
 
     // -------------------------------------------------------------------
     // Plugin lifecycle events
@@ -226,12 +228,7 @@ public class LuaLoader implements JavaFunction, CoronaRuntimeListener {
 
     // return true if SDK is properly initialized
     private boolean isSDKInitialized() {
-        if (coronaListener == CoronaLua.REFNIL) {
-            logMsg(ERROR_MSG, "unityads.init() must be called before calling other API functions");
-            return false;
-        }
-
-        return true;
+        return fInitSuccess;
     }
 
     // dispatch a Lua event to our callback (dynamic handling of properties through map)
@@ -303,14 +300,14 @@ public class LuaLoader implements JavaFunction, CoronaRuntimeListener {
         @Override
         public int invoke(final LuaState luaState)  {
             synchronized (loadedIds) {
-                // set function signature for error / warning messages
-                functionSignature = "unityads.init(listener, options)";
-
-                // prevent init from being called twice
-                if (isSDKInitialized()) {
+                if(fInitStarted) {
                     logMsg(ERROR_MSG, "init() should only be called once");
                     return 0;
                 }
+                fInitStarted = true;
+
+                // set function signature for error / warning messages
+                functionSignature = "unityads.init(listener, options)";
 
                 // check number of arguments passed
                 int nargs = luaState.getTop();
@@ -379,7 +376,15 @@ public class LuaLoader implements JavaFunction, CoronaRuntimeListener {
                 if (coronaActivity != null) {
                     Runnable runnableActivity = new Runnable() {
                         public void run() {
-                            UnityAds.initialize(coronaActivity, fGameId, fTestMode, new CoronaUnityAdsDelegate());
+                            try {
+                                UnityAds.initialize(coronaActivity, fGameId, fTestMode, new CoronaUnityAdsDelegate());
+                            } catch (Throwable ignore) {
+                                Map<String, Object> coronaEvent = new HashMap<>();
+                                coronaEvent.put(EVENT_PHASE_KEY, PHASE_INIT);
+                                coronaEvent.put(CoronaLuaEvent.ISERROR_KEY, true);
+                                coronaEvent.put(EVENT_DATA_KEY, "{\"placementId\":\"" + fGameId + "\", \"errorCode\":-1, \"errorMsg\":\"OutOfMemory\"}");
+                                dispatchLuaEvent(coronaEvent);
+                            }
                         }
                     };
 
@@ -763,6 +768,7 @@ public class LuaLoader implements JavaFunction, CoronaRuntimeListener {
 
         @Override
         public void onInitializationComplete() {
+            fInitSuccess = true;
             Map<String, Object> coronaEvent = new HashMap<>();
             coronaEvent.put(EVENT_PHASE_KEY, PHASE_INIT);
             dispatchLuaEvent(coronaEvent);
