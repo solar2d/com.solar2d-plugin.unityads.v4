@@ -42,7 +42,7 @@ import java.util.Map;
 @SuppressWarnings({"unused", "RedundantSuppression"})
 public class LuaLoader implements JavaFunction, CoronaRuntimeListener {
     private static final String PLUGIN_NAME = "plugin.unityads.v4";
-    private static final String PLUGIN_VERSION = "1.0.0";
+    private static final String PLUGIN_VERSION = "1.0.1";
     private static final String PLUGIN_SDK_VERSION = UnityAds.getVersion();
 
     private static final String EVENT_NAME = "adsRequest";
