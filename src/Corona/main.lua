@@ -165,6 +165,16 @@ local loadRewardedButton = widget.newButton {
     end
 }
 
+local exitButton = widget.newButton {
+    label = "Exit",
+    width = 100,
+    height = 40,
+    labelColor = { default={ 0, 0, 0 }, over={ 0.7, 0.7, 0.7 } },
+    onRelease = function(event)
+        native.requestExit()
+    end
+}
+
 vReady = display.newCircle(10, 10, 6)
 vReady.strokeWidth = 2
 vReady:setStrokeColor(0)
@@ -226,6 +236,11 @@ local layoutDisplayObjects = function(orientation)
 
     loadRewardedButton.x = display.contentCenterX-40
     loadRewardedButton.y = showRewardedButton.y
+
+
+    exitButton.x = display.contentCenterX
+    exitButton.y = showRewardedButton.y+40
+
 end
 
 -- initial layout

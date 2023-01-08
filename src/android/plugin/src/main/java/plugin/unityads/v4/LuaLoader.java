@@ -209,6 +209,8 @@ public class LuaLoader implements JavaFunction, CoronaRuntimeListener {
         CoronaLua.deleteRef(runtime.getLuaState(), coronaListener);
         coronaListener = CoronaLua.REFNIL;
         coronaRuntimeTaskDispatcher = null;
+        fInitSuccess = false;
+        fInitStarted = false;
 
     }
 
@@ -305,7 +307,6 @@ public class LuaLoader implements JavaFunction, CoronaRuntimeListener {
                     return 0;
                 }
                 fInitStarted = true;
-
                 // set function signature for error / warning messages
                 functionSignature = "unityads.init(listener, options)";
 
