@@ -4,4 +4,4 @@
 // import Corona native location and basic settings
 #include "CoronaNative.xcconfig"
 
-OTHER_LDFLAGS = $(inherited) $(CORONA_CUSTOM_LDFLAGS) -all_load -lplayer -framework UnityAds
+OTHER_LDFLAGS = $(inherited) $(CORONA_CUSTOM_LDFLAGS) -all_load -lplayer -framework IronSource

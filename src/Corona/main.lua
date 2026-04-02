@@ -59,14 +59,20 @@ end
 
 -- forward declarations
 local gameId = "n/a"
+local interstitialAdUnitId = "n/a"
+local rewardedAdUnitId = "n/a"
 local platformName = system.getInfo("platformName")
 local vReady
 local rReady
 
 if platformName == "Android" then
-    gameId="1225301"
+    gameId="85460dcd"                       -- LevelPlay demo app key (Android)
+    interstitialAdUnitId="aeyqi3vqlv6o8sh9" -- LevelPlay demo interstitial (Android)
+    rewardedAdUnitId="76yy3nay3ceui2a3"     -- LevelPlay demo rewarded (Android)
 elseif platformName == "iPhone OS" then
-    gameId="1225300"
+    gameId="8545d445"                       -- LevelPlay demo app key (iOS)
+    interstitialAdUnitId="wmgt0712uuux8ju4" -- LevelPlay demo interstitial (iOS)
+    rewardedAdUnitId="qwouvdrkuwivay5q"     -- LevelPlay demo rewarded (iOS)
 else
     print "Unsupported platform"
 end
@@ -78,9 +84,9 @@ local unityadsListener = function(event)
     local data = (event .data ~= nil) and json.decode(event.data) or {}
 
     if (event.phase == "loaded") then
-        if (data.placementId == "video") then
+        if (data.placementId == interstitialAdUnitId) then
             setGreen(vReady)
-        elseif (data.placementId == "rewardedVideo") then
+        elseif (data.placementId == rewardedAdUnitId) then
             setGreen(rReady)
         end
     end
@@ -93,10 +99,10 @@ unityads.init(unityadsListener, {gameId=gameId, testMode=true})
 
 -- test if ads are aleady available
 timer.performWithDelay(3000, function()
-    if (unityads.isLoaded("video")) then
+    if (unityads.isLoaded(interstitialAdUnitId)) then
         setGreen(vReady)
     end
-    if (unityads.isLoaded("rewardedVideo")) then
+    if (unityads.isLoaded(rewardedAdUnitId)) then
         setGreen(rReady)
     end
 end, -1)
@@ -118,7 +124,7 @@ local showVideoButton = widget.newButton {
     labelColor = { default={ 0, 0, 0 }, over={ 0.7, 0.7, 0.7 } },
     onRelease = function(event)
         setRed(vReady)
-        unityads.show("video")
+        unityads.show(interstitialAdUnitId)
         --unityads.setHasUserConsent(true)
     end
 }
@@ -129,7 +135,7 @@ local loadVideoButton = widget.newButton {
     height = 40,
     labelColor = { default={ 0, 0, 0 }, over={ 0.7, 0.7, 0.7 } },
     onRelease = function(event)
-        unityads.load("video")
+        unityads.load(interstitialAdUnitId)
         --unityads.setHasUserConsent(true)
     end
 }
@@ -151,7 +157,7 @@ local showRewardedButton = widget.newButton {
     labelColor = { default={ 0, 0, 0 }, over={ 0.7, 0.7, 0.7 } },
     onRelease = function(event)
         setRed(rReady)
-        unityads.show("rewardedVideo")
+        unityads.show(rewardedAdUnitId)
     end
 }
 local loadRewardedButton = widget.newButton {
@@ -160,7 +166,7 @@ local loadRewardedButton = widget.newButton {
     height = 40,
     labelColor = { default={ 0, 0, 0 }, over={ 0.7, 0.7, 0.7 } },
     onRelease = function(event)
-        unityads.load("rewardedVideo")
+        unityads.load(rewardedAdUnitId, "rewarded")
         --unityads.setHasUserConsent(true)
     end
 }
