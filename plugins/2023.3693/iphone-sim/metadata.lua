@@ -8,7 +8,7 @@ local metadata =
 		-- In this case, the static library is called: libSTATIC_LIB_NAME.a
 		staticLibs = { "UnityAdsPlugin", }, 
 
-		frameworks = { "IronSource", },
+		frameworks = { "UnityAds", },
 		frameworksOptional = { "AdSupport", "AppTrackingTransparency" },
 	}
 }

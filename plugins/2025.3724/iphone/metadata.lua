@@ -7,7 +7,7 @@ local metadata =
 		-- This is the name without the 'lib' prefix.
 		-- In this case, the static library is called: libSTATIC_LIB_NAME.a
 		staticLibs = {  "c++", "sqlite3", "z", "xml2", "UnityAdsPlugin"},
-		frameworks = { 'Accounts', 'JavaScriptCore', 'SystemConfiguration', "FBAudienceNetwork", "Accelerate", "WebKit", "SafariServices", "Accelerate", "IronSource"},
+		frameworks = { 'Accounts', 'JavaScriptCore', 'SystemConfiguration', "Accelerate", "WebKit", "SafariServices", "Accelerate", "IronSource"},
 		frameworksOptional = {"AppTrackingTransparency", 'AdSupport'},
 		usesSwift = true,
 
