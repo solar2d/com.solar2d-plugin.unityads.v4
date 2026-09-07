@@ -14,9 +14,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (instancetype)init NS_UNAVAILABLE;
 - (instancetype)new NS_UNAVAILABLE;
 
-- (instancetype)initWithAppKey:(NSString *)appKey
-               legacyAdFormats:(NSArray<NSString *> *)legacyAdFormats
-                        userId:(nullable NSString *)userId;
+- (instancetype)initWithAppKey:(NSString *)appKey userId:(nullable NSString *)userId;
 
 @property(readonly, nonatomic) NSString *appKey;
 @property(readonly, nonatomic) NSArray<NSString *> *legacyAdFormats;

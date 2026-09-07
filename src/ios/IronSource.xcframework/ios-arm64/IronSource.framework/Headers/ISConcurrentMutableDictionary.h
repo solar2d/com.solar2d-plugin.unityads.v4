@@ -7,22 +7,27 @@
 
 #import <Foundation/Foundation.h>
 
-@interface ISConcurrentMutableDictionary : NSObject
-
-+ (instancetype)dictionary;
+@protocol LPMThreadSafeDictionaryProtocol <NSObject>
 
 - (NSUInteger)count;
-- (id)objectForKey:(id)key;
 
-- (void)setObject:(id)object forKey:(id<NSCopying>)key;
+- (id)objectForKey:(NSString *)key;
+- (void)setObject:(id)object forKey:(NSString *)key;
+- (BOOL)hasObjectForKey:(NSString *)key;
 
-- (void)removeObjectForKey:(id)key;
+- (void)removeObjectForKey:(NSString *)key;
 - (void)removeAllObjects;
 
-- (NSArray *)allKeys;
+- (NSArray<NSString *> *)allKeys;
 - (NSArray *)allValues;
-- (NSDictionary *)allData;
+- (NSDictionary<NSString *, id> *)allData;
 
-- (BOOL)hasObjectForKey:(id)key;
+@end
+
+@interface ISConcurrentMutableDictionary : NSObject <LPMThreadSafeDictionaryProtocol>
+
++ (instancetype)dictionary __attribute__((deprecated("deprecated, use lpmDictionary instead.")));
+
++ (id<LPMThreadSafeDictionaryProtocol>)lpmDictionary;
 
 @end

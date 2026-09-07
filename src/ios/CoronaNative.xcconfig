@@ -5,6 +5,8 @@ CORONA_ROOT=$HOME/Library/Application Support/Corona/Native
 HEADER_SEARCH_PATHS = $(inherited) "$(CORONA_ROOT)/Corona/shared/include/Corona" "$(CORONA_ROOT)/Corona/shared/include/lua" "$(CORONA_ROOT)/Corona/ios/include/Corona"
 
 LIBRARY_SEARCH_PATHS = $(inherited) "$(CORONA_ROOT)/Corona/ios/lib"
+// libplayer.a in Corona/ios/lib is device-only; simulator builds link the simulator slice of libplayer.xcframework
+LIBRARY_SEARCH_PATHS[sdk=iphonesimulator*] = $(BUILT_PRODUCTS_DIR) "$(CORONA_ROOT)/Corona/ios/lib/libplayer.xcframework/ios-arm64_x86_64-simulator"
 
 FRAMEWORK_SEARCH_PATHS = $(inherited) "$(PROJECT_DIR)/EmbeddedFrameworks"
 

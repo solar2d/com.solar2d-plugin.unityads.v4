@@ -50,9 +50,14 @@ checkError
 xcodebuild -project "$path/Plugin.xcodeproj" -configuration $CONFIG -sdk iphonesimulator -UseModernBuildSystem=NO
 checkError
 
-# create universal binary
-lipo -create "$path"/build/$CONFIG-iphoneos/lib$TARGET_NAME.$OUTPUT_SUFFIX "$path"/build/$CONFIG-iphonesimulator/lib$TARGET_NAME.$OUTPUT_SUFFIX -output "$OUTPUT_DIR"/lib$TARGET_NAME.$OUTPUT_SUFFIX
-checkError
+# create universal binary (device + simulator). Both slices contain arm64 now that the
+# simulator library is built for Apple Silicon too, so lipo cannot merge them into one
+# file; in that case the per-platform libraries under BuiltPlugin are the deliverables.
+if ! lipo -create "$path"/build/$CONFIG-iphoneos/lib$TARGET_NAME.$OUTPUT_SUFFIX "$path"/build/$CONFIG-iphonesimulator/lib$TARGET_NAME.$OUTPUT_SUFFIX -output "$OUTPUT_DIR"/lib$TARGET_NAME.$OUTPUT_SUFFIX 2>/dev/null
+then
+	echo "Device and simulator libraries both contain arm64; skipping the combined universal library."
+	rm -f "$OUTPUT_DIR"/lib$TARGET_NAME.$OUTPUT_SUFFIX
+fi
 
 
 # copy corona plugin structure
@@ -76,23 +81,30 @@ build_plugin_structure() {
 	fi
 
 
-	if ls "$path"/EmbeddedFrameworks/*.framework 1> /dev/null 2>&1; then
+	# 3rd party frameworks. Device builds use EmbeddedFrameworks, simulator builds
+	# use EmbeddedFrameworksSim when it exists (the IronSource xcframework ships
+	# separate device and simulator slices).
+	EMBEDDED_DIR="$path/EmbeddedFrameworks"
+	if [[ "$PLATFORM" == "iphonesimulator" && -d "$path/EmbeddedFrameworksSim" ]]; then
+		EMBEDDED_DIR="$path/EmbeddedFrameworksSim"
+	fi
+
+	if ls "$EMBEDDED_DIR"/*.framework 1> /dev/null 2>&1; then
 		echo "Copying Embedded frameworks frameworks for $PLATFORM:"
 
-		for f in "$path"/EmbeddedFrameworks/*.framework; do
+		for f in "$EMBEDDED_DIR"/*.framework; do
 			FRAMEWORK_NAME=$(basename "$f")
 			BIN_NAME=${FRAMEWORK_NAME%.framework}
 			SRC_BIN="$f"/$BIN_NAME
 
 			if [[ $(file "$SRC_BIN" | grep -c "ar archive") -ne 0 ]]; then
-				echo " - $FRAMEWORK_NAME: is a static Framework, extracting."
+				# Static framework: copy the slice verbatim (binary, headers, module map,
+				# privacy manifest). The binary may be a single-arch (non-fat) archive, so
+				# it must not be passed through lipo -extract.
+				echo " - $FRAMEWORK_NAME: is a static Framework, copying."
 
-				DEST_BIN="$PLUGIN_DEST"/$FRAMEWORK_NAME/$BIN_NAME
-				"$(xcrun -f rsync)" --links --exclude '*.xcconfig' --exclude _CodeSignature --exclude .DS_Store --exclude CVS --exclude .svn --exclude .git --exclude .hg --exclude Headers --exclude PrivateHeaders --exclude Modules -resolve-src-symlinks "$f"  "$PLUGIN_DEST"
-				rm "$DEST_BIN"
-				lipo "$SRC_BIN" $ARCH -o "$DEST_BIN.tmp"
-				$(xcrun -f bitcode_strip) "$DEST_BIN.tmp" -r -o "$DEST_BIN"
-				rm "$DEST_BIN.tmp"
+				rm -rf "$PLUGIN_DEST/$FRAMEWORK_NAME"
+				"$(xcrun -f rsync)" -a --links --exclude '*.xcconfig' --exclude .DS_Store --exclude CVS --exclude .svn --exclude .git --exclude .hg -resolve-src-symlinks "$f" "$PLUGIN_DEST"
 				rm -rf "$PLUGIN_DEST/$FRAMEWORK_NAME/Versions"
 			else
 				echo " + $FRAMEWORK_NAME: embedding"
@@ -121,4 +133,4 @@ build_plugin_structure "$OUTPUT_DIR/BuiltPlugin/iphone-sim" iphonesimulator  " -
 
 
 
-echo "$OUTPUT_DIR"/lib$TARGET_NAME.$OUTPUT_SUFFIX
+echo "Built plugin: $OUTPUT_DIR/BuiltPlugin"

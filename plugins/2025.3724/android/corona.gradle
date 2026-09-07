@@ -3,9 +3,9 @@ android.defaultConfig {
 }
 configurations.all {
     resolutionStrategy {
-        force "org.jetbrains.kotlin:kotlin-stdlib:1.8.0"
-        force "org.jetbrains.kotlin:kotlin-stdlib-jdk7:1.8.0"
-        force "org.jetbrains.kotlin:kotlin-stdlib-jdk8:1.8.0"
+        force "org.jetbrains.kotlin:kotlin-stdlib:2.1.21"
+        force "org.jetbrains.kotlin:kotlin-stdlib-jdk7:2.1.21"
+        force "org.jetbrains.kotlin:kotlin-stdlib-jdk8:2.1.21"
     }
 }
 repositories {
@@ -16,5 +16,13 @@ repositories {
 }
 
 dependencies {
-    implementation 'com.unity3d.ads-mediation:mediation-sdk:9.0.0' 
+    implementation 'com.unity3d.ads-mediation:mediation-sdk:9.6.0'
+    // LevelPlay 9.x runs on Kotlin coroutines but its POM does not declare them; without this the
+    // SDK logs "Failed to launch coroutine" (NoClassDefFoundError kotlinx.coroutines.Dispatchers).
+    // 1.10.x is the coroutines line built for Kotlin 2.1, matching the forced kotlin-stdlib above.
+    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2'
+    // Google identifier libraries the LevelPlay integration guide requires for GAID / App Set ID.
+    implementation 'com.google.android.gms:play-services-appset:16.0.0'
+    implementation 'com.google.android.gms:play-services-ads-identifier:18.1.0'
+    implementation 'com.google.android.gms:play-services-basement:18.1.0'
 }

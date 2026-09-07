@@ -29,13 +29,17 @@
 // ----------------------------------------------------------------------------
 
 #define PLUGIN_NAME        "plugin.unityads.v4"
-#define PLUGIN_VERSION     "2.0.0"
+#define PLUGIN_VERSION     "2.1.0"
 
 static const char EVENT_NAME[]    = "adsRequest";
 static const char PROVIDER_NAME[] = "unityads";
 
 // ad types
 static const char TYPE_UNITYAD[] = "unityAd";
+
+// ad formats accepted by unityads.load()
+static NSString * const AD_TYPE_INTERSTITIAL = @"interstitial";
+static NSString * const AD_TYPE_REWARDED     = @"rewarded";
 
 // event phases
 static NSString * const PHASE_INIT      = @"init";
@@ -58,20 +62,87 @@ static NSString * const DATA_ERROR_MSG_KEY    = @"errorMsg";
 static NSString * const ERROR_MSG   = @"ERROR: ";
 static NSString * const WARNING_MSG = @"WARNING: ";
 
-// Store ad objects keyed by adUnitId
-static NSMutableDictionary *adObjects = nil;
-// Track loaded ad unit IDs
-static NSMutableSet *loadedIds = nil;
-// Track rewarded ad unit IDs (for skipped vs completed)
-static NSMutableSet *rewardedIds = nil;
+// A load that has not reported back after this long is treated as abandoned, so a
+// later unityads.load() is forwarded to the SDK again instead of being dropped.
+static const NSTimeInterval LOAD_STALE_SECONDS = 120.0;
+
+// LevelPlay error code reported when loadAd is called while the ad unit already has a
+// load in flight or a loaded ad waiting (ERROR_CODE_LOAD_FAILED_ALREADY_CALLED).
+static const NSInteger LEVELPLAY_ERROR_LOAD_ALREADY_CALLED = 627;
+
+// ----------------------------------------------------------------------------
+// Ad slot: one persistent LevelPlay ad object per ad unit
+// ----------------------------------------------------------------------------
+//
+// LevelPlay documents LPMInterstitialAd / LPMRewardedAd as reusable instances that
+// handle every load and show for an ad unit during the session. Earlier versions of
+// this plugin allocated a fresh ad object (plus delegate) on every unityads.load()
+// call and dropped it after each close or failure, so apps that call load()
+// repeatedly fanned out into several concurrent SDK loads and a growing pile of
+// SDK-internal state. A slot keeps exactly one ad object per ad unit instead.
+
+@interface CoronaAdSlot : NSObject
+@property (nonatomic, strong) NSString *adUnitId;
+@property (nonatomic, strong) NSString *adType;       // AD_TYPE_INTERSTITIAL or AD_TYPE_REWARDED
+@property (nonatomic, strong) id ad;                  // LPMInterstitialAd or LPMRewardedAd
+@property (nonatomic, strong) id delegate;            // kept alive here; the SDK only holds it weakly
+@property (nonatomic, assign) BOOL isLoading;         // a loadAd call is in flight
+@property (nonatomic, assign) NSTimeInterval loadStartedAt;
+@property (nonatomic, assign) BOOL isReady;           // didLoadAd received and the ad has not been shown yet
+@property (nonatomic, assign) BOOL rewardEarned;      // rewarded only: didRewardAd received during the current show
+- (BOOL)isAdReady;
+- (void)loadAd;
+- (void)showAdWithViewController:(UIViewController *)viewController;
+@end
+
+@implementation CoronaAdSlot
+
+- (BOOL)isAdReady {
+    if ([self.ad isKindOfClass:[LPMInterstitialAd class]]) {
+        return [(LPMInterstitialAd *)self.ad isAdReady];
+    }
+    if ([self.ad isKindOfClass:[LPMRewardedAd class]]) {
+        return [(LPMRewardedAd *)self.ad isAdReady];
+    }
+    return NO;
+}
+
+- (void)loadAd {
+    if ([self.ad isKindOfClass:[LPMInterstitialAd class]]) {
+        [(LPMInterstitialAd *)self.ad loadAd];
+    }
+    else if ([self.ad isKindOfClass:[LPMRewardedAd class]]) {
+        [(LPMRewardedAd *)self.ad loadAd];
+    }
+}
+
+- (void)showAdWithViewController:(UIViewController *)viewController {
+    if ([self.ad isKindOfClass:[LPMInterstitialAd class]]) {
+        [(LPMInterstitialAd *)self.ad showAdWithViewController:viewController placementName:nil];
+    }
+    else if ([self.ad isKindOfClass:[LPMRewardedAd class]]) {
+        [(LPMRewardedAd *)self.ad showAdWithViewController:viewController placementName:nil];
+    }
+}
+
+@end
+
+// ad slots keyed by adUnitId
+static NSMutableDictionary<NSString *, CoronaAdSlot *> *adSlots = nil;
 
 // ----------------------------------------------------------------------------
 // plugin class and delegate definitions
 // ----------------------------------------------------------------------------
 
-// Forward declarations for listener classes
-@class CoronaInterstitialAdDelegate;
-@class CoronaRewardedAdDelegate;
+@interface CoronaInterstitialAdDelegate : NSObject <LPMInterstitialAdDelegate>
+@property (nonatomic, strong) NSString *adUnitId;
+- (instancetype)initWithAdUnitId:(NSString *)adUnitId;
+@end
+
+@interface CoronaRewardedAdDelegate : NSObject <LPMRewardedAdDelegate>
+@property (nonatomic, strong) NSString *adUnitId;
+- (instancetype)initWithAdUnitId:(NSString *)adUnitId;
+@end
 
 // ----------------------------------------------------------------------------
 
@@ -103,10 +174,14 @@ class UnityAdsPlugin
 
   public: // helper functions used by delegates
     static NSString *getJSONStringForPlacement(NSString *placementId, int errorCode, NSString *errorMsg);
+    static void dispatchLuaEvent(NSDictionary *event);
+    static CoronaAdSlot *slotForAdUnitId(NSString *adUnitId);
+    static void handleLoadFailed(NSString *adUnitId, NSError *error);
 
   private: // internal helper functions
     static void logMsg(lua_State *L, NSString *msgType,  NSString *errorMsg);
     static bool isSDKInitialized(lua_State *L);
+    static void initializeLevelPlay(NSString *appKey, BOOL testMode);
 
   private:
     NSString *functionSignature;
@@ -125,11 +200,6 @@ id<CoronaRuntime> UnityAdsPlugin::coronaRuntime = NULL;
 // Interstitial Ad Delegate
 // ----------------------------------------------------------------------------
 
-@interface CoronaInterstitialAdDelegate : NSObject <LPMInterstitialAdDelegate>
-@property (nonatomic, strong) NSString *adUnitId;
-- (instancetype)initWithAdUnitId:(NSString *)adUnitId;
-@end
-
 @implementation CoronaInterstitialAdDelegate
 
 - (instancetype)initWithAdUnitId:(NSString *)adUnitId {
@@ -139,98 +209,63 @@ id<CoronaRuntime> UnityAdsPlugin::coronaRuntime = NULL;
     return self;
 }
 
-- (void)dispatchLuaEvent:(NSDictionary *)dict {
-    [[NSOperationQueue mainQueue] addOperationWithBlock:^{
-        lua_State *L = UnityAdsPlugin::coronaRuntime.L;
-        CoronaLuaRef listener = UnityAdsPlugin::coronaListener;
-        bool hasErrorKey = false;
-
-        CoronaLuaNewEvent(L, EVENT_NAME);
-
-        for (NSString *key in dict) {
-            CoronaLuaPushValue(L, [dict valueForKey:key]);
-            lua_setfield(L, -2, key.UTF8String);
-
-            if (!hasErrorKey) {
-                hasErrorKey = [key isEqualToString:@(CoronaEventIsErrorKey())];
-            }
-        }
-
-        if (!hasErrorKey) {
-            lua_pushboolean(L, false);
-            lua_setfield(L, -2, CoronaEventIsErrorKey());
-        }
-
-        lua_pushstring(L, PROVIDER_NAME);
-        lua_setfield(L, -2, CoronaEventProviderKey());
-
-        CoronaLuaDispatchEvent(L, listener, 0);
-    }];
+- (CoronaAdSlot *)slot {
+    return UnityAdsPlugin::slotForAdUnitId(self.adUnitId);
 }
 
 - (void)didLoadAdWithAdInfo:(LPMAdInfo *)adInfo {
-    [loadedIds addObject:self.adUnitId];
-    NSDictionary *coronaEvent = @{
+    CoronaAdSlot *slot = [self slot];
+    slot.isLoading = NO;
+    slot.isReady = YES;
+
+    UnityAdsPlugin::dispatchLuaEvent(@{
         @(CoronaEventPhaseKey()) : PHASE_LOADED,
         @(CoronaEventTypeKey()) : @(TYPE_UNITYAD),
         CORONA_EVENT_DATA_KEY : UnityAdsPlugin::getJSONStringForPlacement(self.adUnitId, -1, nil)
-    };
-    [self dispatchLuaEvent:coronaEvent];
+    });
 }
 
 - (void)didFailToLoadAdWithAdUnitId:(NSString *)adUnitId error:(NSError *)error {
-    [loadedIds removeObject:self.adUnitId];
-    [adObjects removeObjectForKey:self.adUnitId];
-    NSDictionary *coronaEvent = @{
-        @(CoronaEventPhaseKey()) : PHASE_FAILED,
-        @(CoronaEventIsErrorKey()) : @(true),
-        @(CoronaEventTypeKey()) : @(TYPE_UNITYAD),
-        @(CoronaEventResponseKey()) : error.localizedDescription ?: @"Load failed",
-        CORONA_EVENT_DATA_KEY : UnityAdsPlugin::getJSONStringForPlacement(self.adUnitId, (int)error.code, error.localizedDescription)
-    };
-    [self dispatchLuaEvent:coronaEvent];
+    UnityAdsPlugin::handleLoadFailed(self.adUnitId, error);
 }
 
 - (void)didDisplayAdWithAdInfo:(LPMAdInfo *)adInfo {
-    [loadedIds removeObject:self.adUnitId];
-    NSDictionary *coronaEvent = @{
+    [self slot].isReady = NO;
+
+    UnityAdsPlugin::dispatchLuaEvent(@{
         @(CoronaEventPhaseKey()) : PHASE_DISPLAYED,
         @(CoronaEventTypeKey()) : @(TYPE_UNITYAD),
         CORONA_EVENT_DATA_KEY : UnityAdsPlugin::getJSONStringForPlacement(self.adUnitId, -1, nil)
-    };
-    [self dispatchLuaEvent:coronaEvent];
+    });
 }
 
 - (void)didFailToDisplayAdWithAdInfo:(LPMAdInfo *)adInfo error:(NSError *)error {
-    [loadedIds removeObject:self.adUnitId];
-    [adObjects removeObjectForKey:self.adUnitId];
-    NSDictionary *coronaEvent = @{
+    [self slot].isReady = NO;
+
+    UnityAdsPlugin::dispatchLuaEvent(@{
         @(CoronaEventPhaseKey()) : PHASE_FAILED,
         @(CoronaEventIsErrorKey()) : @(true),
         @(CoronaEventTypeKey()) : @(TYPE_UNITYAD),
         @(CoronaEventResponseKey()) : error.localizedDescription ?: @"Display failed",
         CORONA_EVENT_DATA_KEY : UnityAdsPlugin::getJSONStringForPlacement(self.adUnitId, (int)error.code, error.localizedDescription)
-    };
-    [self dispatchLuaEvent:coronaEvent];
+    });
 }
 
 - (void)didClickAdWithAdInfo:(LPMAdInfo *)adInfo {
-    NSDictionary *coronaEvent = @{
+    UnityAdsPlugin::dispatchLuaEvent(@{
         @(CoronaEventPhaseKey()) : PHASE_CLICKED,
         @(CoronaEventTypeKey()) : @(TYPE_UNITYAD),
         CORONA_EVENT_DATA_KEY : UnityAdsPlugin::getJSONStringForPlacement(self.adUnitId, -1, nil)
-    };
-    [self dispatchLuaEvent:coronaEvent];
+    });
 }
 
 - (void)didCloseAdWithAdInfo:(LPMAdInfo *)adInfo {
-    [adObjects removeObjectForKey:self.adUnitId];
-    NSDictionary *coronaEvent = @{
+    // The ad object stays in its slot; the next unityads.load() reuses it.
+    UnityAdsPlugin::dispatchLuaEvent(@{
         @(CoronaEventPhaseKey()) : PHASE_COMPLETED,
         @(CoronaEventTypeKey()) : @(TYPE_UNITYAD),
         CORONA_EVENT_DATA_KEY : UnityAdsPlugin::getJSONStringForPlacement(self.adUnitId, -1, nil)
-    };
-    [self dispatchLuaEvent:coronaEvent];
+    });
 }
 
 - (void)didChangeAdInfo:(LPMAdInfo *)adInfo {
@@ -243,11 +278,6 @@ id<CoronaRuntime> UnityAdsPlugin::coronaRuntime = NULL;
 // Rewarded Ad Delegate
 // ----------------------------------------------------------------------------
 
-@interface CoronaRewardedAdDelegate : NSObject <LPMRewardedAdDelegate>
-@property (nonatomic, strong) NSString *adUnitId;
-- (instancetype)initWithAdUnitId:(NSString *)adUnitId;
-@end
-
 @implementation CoronaRewardedAdDelegate
 
 - (instancetype)initWithAdUnitId:(NSString *)adUnitId {
@@ -257,111 +287,75 @@ id<CoronaRuntime> UnityAdsPlugin::coronaRuntime = NULL;
     return self;
 }
 
-- (void)dispatchLuaEvent:(NSDictionary *)dict {
-    [[NSOperationQueue mainQueue] addOperationWithBlock:^{
-        lua_State *L = UnityAdsPlugin::coronaRuntime.L;
-        CoronaLuaRef listener = UnityAdsPlugin::coronaListener;
-        bool hasErrorKey = false;
-
-        CoronaLuaNewEvent(L, EVENT_NAME);
-
-        for (NSString *key in dict) {
-            CoronaLuaPushValue(L, [dict valueForKey:key]);
-            lua_setfield(L, -2, key.UTF8String);
-
-            if (!hasErrorKey) {
-                hasErrorKey = [key isEqualToString:@(CoronaEventIsErrorKey())];
-            }
-        }
-
-        if (!hasErrorKey) {
-            lua_pushboolean(L, false);
-            lua_setfield(L, -2, CoronaEventIsErrorKey());
-        }
-
-        lua_pushstring(L, PROVIDER_NAME);
-        lua_setfield(L, -2, CoronaEventProviderKey());
-
-        CoronaLuaDispatchEvent(L, listener, 0);
-    }];
+- (CoronaAdSlot *)slot {
+    return UnityAdsPlugin::slotForAdUnitId(self.adUnitId);
 }
 
 - (void)didLoadAdWithAdInfo:(LPMAdInfo *)adInfo {
-    [loadedIds addObject:self.adUnitId];
-    NSDictionary *coronaEvent = @{
+    CoronaAdSlot *slot = [self slot];
+    slot.isLoading = NO;
+    slot.isReady = YES;
+
+    UnityAdsPlugin::dispatchLuaEvent(@{
         @(CoronaEventPhaseKey()) : PHASE_LOADED,
         @(CoronaEventTypeKey()) : @(TYPE_UNITYAD),
         CORONA_EVENT_DATA_KEY : UnityAdsPlugin::getJSONStringForPlacement(self.adUnitId, -1, nil)
-    };
-    [self dispatchLuaEvent:coronaEvent];
+    });
 }
 
 - (void)didFailToLoadAdWithAdUnitId:(NSString *)adUnitId error:(NSError *)error {
-    [loadedIds removeObject:self.adUnitId];
-    [adObjects removeObjectForKey:self.adUnitId];
-    NSDictionary *coronaEvent = @{
-        @(CoronaEventPhaseKey()) : PHASE_FAILED,
-        @(CoronaEventIsErrorKey()) : @(true),
-        @(CoronaEventTypeKey()) : @(TYPE_UNITYAD),
-        @(CoronaEventResponseKey()) : error.localizedDescription ?: @"Load failed",
-        CORONA_EVENT_DATA_KEY : UnityAdsPlugin::getJSONStringForPlacement(self.adUnitId, (int)error.code, error.localizedDescription)
-    };
-    [self dispatchLuaEvent:coronaEvent];
+    UnityAdsPlugin::handleLoadFailed(self.adUnitId, error);
 }
 
 - (void)didDisplayAdWithAdInfo:(LPMAdInfo *)adInfo {
-    [loadedIds removeObject:self.adUnitId];
-    [rewardedIds removeObject:self.adUnitId];
-    NSDictionary *coronaEvent = @{
+    CoronaAdSlot *slot = [self slot];
+    slot.isReady = NO;
+    slot.rewardEarned = NO;
+
+    UnityAdsPlugin::dispatchLuaEvent(@{
         @(CoronaEventPhaseKey()) : PHASE_DISPLAYED,
         @(CoronaEventTypeKey()) : @(TYPE_UNITYAD),
         CORONA_EVENT_DATA_KEY : UnityAdsPlugin::getJSONStringForPlacement(self.adUnitId, -1, nil)
-    };
-    [self dispatchLuaEvent:coronaEvent];
+    });
 }
 
 - (void)didFailToDisplayAdWithAdInfo:(LPMAdInfo *)adInfo error:(NSError *)error {
-    [loadedIds removeObject:self.adUnitId];
-    [adObjects removeObjectForKey:self.adUnitId];
-    NSDictionary *coronaEvent = @{
+    [self slot].isReady = NO;
+
+    UnityAdsPlugin::dispatchLuaEvent(@{
         @(CoronaEventPhaseKey()) : PHASE_FAILED,
         @(CoronaEventIsErrorKey()) : @(true),
         @(CoronaEventTypeKey()) : @(TYPE_UNITYAD),
         @(CoronaEventResponseKey()) : error.localizedDescription ?: @"Display failed",
         CORONA_EVENT_DATA_KEY : UnityAdsPlugin::getJSONStringForPlacement(self.adUnitId, (int)error.code, error.localizedDescription)
-    };
-    [self dispatchLuaEvent:coronaEvent];
+    });
 }
 
 - (void)didClickAdWithAdInfo:(LPMAdInfo *)adInfo {
-    NSDictionary *coronaEvent = @{
+    UnityAdsPlugin::dispatchLuaEvent(@{
         @(CoronaEventPhaseKey()) : PHASE_CLICKED,
         @(CoronaEventTypeKey()) : @(TYPE_UNITYAD),
         CORONA_EVENT_DATA_KEY : UnityAdsPlugin::getJSONStringForPlacement(self.adUnitId, -1, nil)
-    };
-    [self dispatchLuaEvent:coronaEvent];
+    });
 }
 
 - (void)didRewardAdWithAdInfo:(LPMAdInfo *)adInfo reward:(LPMReward *)reward {
-    [rewardedIds addObject:self.adUnitId];
+    [self slot].rewardEarned = YES;
 }
 
 - (void)didCloseAdWithAdInfo:(LPMAdInfo *)adInfo {
-    [adObjects removeObjectForKey:self.adUnitId];
-    NSMutableDictionary *coronaEvent = [@{
+    CoronaAdSlot *slot = [self slot];
+
+    // If a reward was received the ad was completed; otherwise it was skipped
+    NSString *phase = slot.rewardEarned ? PHASE_COMPLETED : PHASE_SKIPPED;
+    slot.rewardEarned = NO;
+
+    // The ad object stays in its slot; the next unityads.load() reuses it.
+    UnityAdsPlugin::dispatchLuaEvent(@{
+        @(CoronaEventPhaseKey()) : phase,
         @(CoronaEventTypeKey()) : @(TYPE_UNITYAD),
         CORONA_EVENT_DATA_KEY : UnityAdsPlugin::getJSONStringForPlacement(self.adUnitId, -1, nil)
-    } mutableCopy];
-
-    // If reward was received, it's completed; otherwise skipped
-    if ([rewardedIds containsObject:self.adUnitId]) {
-        coronaEvent[@(CoronaEventPhaseKey())] = PHASE_COMPLETED;
-        [rewardedIds removeObject:self.adUnitId];
-    } else {
-        coronaEvent[@(CoronaEventPhaseKey())] = PHASE_SKIPPED;
-    }
-
-    [self dispatchLuaEvent:coronaEvent];
+    });
 }
 
 - (void)didChangeAdInfo:(LPMAdInfo *)adInfo {
@@ -402,6 +396,47 @@ UnityAdsPlugin::isSDKInitialized(lua_State *L)
   return true;
 }
 
+CoronaAdSlot *
+UnityAdsPlugin::slotForAdUnitId(NSString *adUnitId)
+{
+  return (adUnitId != nil) ? adSlots[adUnitId] : nil;
+}
+
+// Shared by both delegates: a load failure, with the "load already called" case
+// (error 627) mapped back to a loaded event when the SDK still holds a showable ad.
+void
+UnityAdsPlugin::handleLoadFailed(NSString *adUnitId, NSError *error)
+{
+  CoronaAdSlot *slot = slotForAdUnitId(adUnitId);
+  bool alreadyCalled = (error != nil && error.code == LEVELPLAY_ERROR_LOAD_ALREADY_CALLED);
+
+  if (slot != nil) {
+    slot.isLoading = NO;
+
+    if (alreadyCalled && [slot isAdReady]) {
+      slot.isReady = YES;
+      dispatchLuaEvent(@{
+        @(CoronaEventPhaseKey()) : PHASE_LOADED,
+        @(CoronaEventTypeKey()) : @(TYPE_UNITYAD),
+        CORONA_EVENT_DATA_KEY : getJSONStringForPlacement(adUnitId, -1, nil)
+      });
+      return;
+    }
+
+    if (! alreadyCalled) {
+      slot.isReady = NO;
+    }
+  }
+
+  dispatchLuaEvent(@{
+    @(CoronaEventPhaseKey()) : PHASE_FAILED,
+    @(CoronaEventIsErrorKey()) : @(true),
+    @(CoronaEventTypeKey()) : @(TYPE_UNITYAD),
+    @(CoronaEventResponseKey()) : error.localizedDescription ?: @"Load failed",
+    CORONA_EVENT_DATA_KEY : getJSONStringForPlacement(adUnitId, (int)error.code, error.localizedDescription)
+  });
+}
+
 NSString *
 UnityAdsPlugin::getJSONStringForPlacement(NSString *placementId, int errorCode, NSString *errorMsg)
 {
@@ -419,6 +454,73 @@ UnityAdsPlugin::getJSONStringForPlacement(NSString *placementId, int errorCode, 
     NSData *jsonData = [NSJSONSerialization dataWithJSONObject:dataDictionary options:0 error:nil];
 
     return [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding];
+}
+
+// Delivers an adsRequest event to the Lua listener on the main thread.
+// Adds isError=false when the event does not carry its own isError value.
+void
+UnityAdsPlugin::dispatchLuaEvent(NSDictionary *event)
+{
+  [[NSOperationQueue mainQueue] addOperationWithBlock:^{
+    // SDK callbacks can still be queued after the runtime was torn down (Finalizer)
+    if (coronaRuntime == nil || coronaListener == NULL) {
+      return;
+    }
+
+    lua_State *L = coronaRuntime.L;
+    if (L == NULL) {
+      return;
+    }
+
+    bool hasErrorKey = false;
+
+    CoronaLuaNewEvent(L, EVENT_NAME);
+
+    for (NSString *key in event) {
+      CoronaLuaPushValue(L, [event objectForKey:key]);
+      lua_setfield(L, -2, key.UTF8String);
+
+      if (!hasErrorKey) {
+        hasErrorKey = [key isEqualToString:@(CoronaEventIsErrorKey())];
+      }
+    }
+
+    if (!hasErrorKey) {
+      lua_pushboolean(L, false);
+      lua_setfield(L, -2, CoronaEventIsErrorKey());
+    }
+
+    lua_pushstring(L, PROVIDER_NAME);
+    lua_setfield(L, -2, CoronaEventProviderKey());
+
+    CoronaLuaDispatchEvent(L, coronaListener, 0);
+  }];
+}
+
+void
+UnityAdsPlugin::initializeLevelPlay(NSString *appKey, BOOL testMode)
+{
+  if (testMode) {
+    [LevelPlay setAdaptersDebug:YES];
+  }
+
+  LPMInitRequestBuilder *requestBuilder = [[LPMInitRequestBuilder alloc] initWithAppKey:appKey];
+  LPMInitRequest *initRequest = [requestBuilder build];
+
+  [LevelPlay initWithRequest:initRequest completion:^(LPMConfiguration *_Nullable config, NSError *_Nullable error) {
+    if (error) {
+      dispatchLuaEvent(@{
+        @(CoronaEventPhaseKey()) : PHASE_INIT,
+        @(CoronaEventIsErrorKey()) : @(true),
+        CORONA_EVENT_DATA_KEY : getJSONStringForPlacement(nil, (int)error.code, error.localizedDescription)
+      });
+    }
+    else {
+      dispatchLuaEvent(@{
+        @(CoronaEventPhaseKey()) : PHASE_INIT
+      });
+    }
+  }];
 }
 
 // ----------------------------------------------------------------------------
@@ -465,9 +567,9 @@ UnityAdsPlugin::Finalizer( lua_State *L )
   coronaListener = NULL;
   coronaRuntime = NULL;
 
-  [adObjects removeAllObjects];
-  [loadedIds removeAllObjects];
-  [rewardedIds removeAllObjects];
+  // Dropping the slots releases our delegates; the SDK only holds them weakly, so any
+  // callback that is still in flight is discarded instead of reaching a dead Lua state.
+  [adSlots removeAllObjects];
 
   delete library;
 
@@ -499,9 +601,7 @@ UnityAdsPlugin::Initialize( void *platformContext )
     functionSignature = @"";
 
     // Initialize storage
-    adObjects = [NSMutableDictionary new];
-    loadedIds = [NSMutableSet new];
-    rewardedIds = [NSMutableSet new];
+    adSlots = [NSMutableDictionary new];
   }
 
   return shouldInit;
@@ -585,126 +685,26 @@ UnityAdsPlugin::init( lua_State *L )
     return 0;
   }
 
-  NSLog(@"%s: %s (LevelPlay)", PLUGIN_NAME, PLUGIN_VERSION);
+  NSLog(@"%s: %s (LevelPlay SDK %@)", PLUGIN_NAME, PLUGIN_VERSION, [LevelPlay sdkVersion]);
 
   NSString *appKey = @(gameId);
   BOOL fTestMode = testMode;
 
-  // Request ATT before initializing
-  bool noAtt = true;
+  // Request ATT before initializing, but only when the app declares a usage description
+  bool attRequested = false;
   if (@available(iOS 14, tvOS 14, *)) {
     if ([[NSBundle mainBundle] objectForInfoDictionaryKey:@"NSUserTrackingUsageDescription"]) {
-      noAtt = false;
+      attRequested = true;
       [ATTrackingManager requestTrackingAuthorizationWithCompletionHandler:^(ATTrackingManagerAuthorizationStatus status) {
         [[NSOperationQueue mainQueue] addOperationWithBlock:^{
-          if (fTestMode) {
-            [LevelPlay setAdaptersDebug:YES];
-          }
-
-          LPMInitRequestBuilder *requestBuilder = [[LPMInitRequestBuilder alloc] initWithAppKey:appKey];
-          LPMInitRequest *initRequest = [requestBuilder build];
-
-          [LevelPlay initWithRequest:initRequest completion:^(LPMConfiguration *_Nullable config, NSError *_Nullable error) {
-            if (error) {
-              NSDictionary *coronaEvent = @{
-                @(CoronaEventPhaseKey()) : PHASE_INIT,
-                @(CoronaEventIsErrorKey()) : @(true),
-                CORONA_EVENT_DATA_KEY : UnityAdsPlugin::getJSONStringForPlacement(nil, (int)error.code, error.localizedDescription)
-              };
-              // Use interstitial delegate's dispatch method via a temporary helper
-              [[NSOperationQueue mainQueue] addOperationWithBlock:^{
-                lua_State *Lua = coronaRuntime.L;
-                CoronaLuaNewEvent(Lua, EVENT_NAME);
-
-                for (NSString *key in coronaEvent) {
-                  CoronaLuaPushValue(Lua, [coronaEvent valueForKey:key]);
-                  lua_setfield(Lua, -2, key.UTF8String);
-                }
-
-                lua_pushstring(Lua, PROVIDER_NAME);
-                lua_setfield(Lua, -2, CoronaEventProviderKey());
-
-                CoronaLuaDispatchEvent(Lua, coronaListener, 0);
-              }];
-            } else {
-              NSDictionary *coronaEvent = @{
-                @(CoronaEventPhaseKey()) : PHASE_INIT
-              };
-              [[NSOperationQueue mainQueue] addOperationWithBlock:^{
-                lua_State *Lua = coronaRuntime.L;
-                CoronaLuaNewEvent(Lua, EVENT_NAME);
-
-                for (NSString *key in coronaEvent) {
-                  CoronaLuaPushValue(Lua, [coronaEvent valueForKey:key]);
-                  lua_setfield(Lua, -2, key.UTF8String);
-                }
-
-                lua_pushboolean(Lua, false);
-                lua_setfield(Lua, -2, CoronaEventIsErrorKey());
-
-                lua_pushstring(Lua, PROVIDER_NAME);
-                lua_setfield(Lua, -2, CoronaEventProviderKey());
-
-                CoronaLuaDispatchEvent(Lua, coronaListener, 0);
-              }];
-            }
-          }];
+          initializeLevelPlay(appKey, fTestMode);
         }];
       }];
     }
   }
-  if (noAtt) {
-    if (fTestMode) {
-      [LevelPlay setAdaptersDebug:YES];
-    }
 
-    LPMInitRequestBuilder *requestBuilder = [[LPMInitRequestBuilder alloc] initWithAppKey:appKey];
-    LPMInitRequest *initRequest = [requestBuilder build];
-
-    [LevelPlay initWithRequest:initRequest completion:^(LPMConfiguration *_Nullable config, NSError *_Nullable error) {
-      if (error) {
-        NSDictionary *coronaEvent = @{
-          @(CoronaEventPhaseKey()) : PHASE_INIT,
-          @(CoronaEventIsErrorKey()) : @(true),
-          CORONA_EVENT_DATA_KEY : UnityAdsPlugin::getJSONStringForPlacement(nil, (int)error.code, error.localizedDescription)
-        };
-        [[NSOperationQueue mainQueue] addOperationWithBlock:^{
-          lua_State *Lua = coronaRuntime.L;
-          CoronaLuaNewEvent(Lua, EVENT_NAME);
-
-          for (NSString *key in coronaEvent) {
-            CoronaLuaPushValue(Lua, [coronaEvent valueForKey:key]);
-            lua_setfield(Lua, -2, key.UTF8String);
-          }
-
-          lua_pushstring(Lua, PROVIDER_NAME);
-          lua_setfield(Lua, -2, CoronaEventProviderKey());
-
-          CoronaLuaDispatchEvent(Lua, coronaListener, 0);
-        }];
-      } else {
-        NSDictionary *coronaEvent = @{
-          @(CoronaEventPhaseKey()) : PHASE_INIT
-        };
-        [[NSOperationQueue mainQueue] addOperationWithBlock:^{
-          lua_State *Lua = coronaRuntime.L;
-          CoronaLuaNewEvent(Lua, EVENT_NAME);
-
-          for (NSString *key in coronaEvent) {
-            CoronaLuaPushValue(Lua, [coronaEvent valueForKey:key]);
-            lua_setfield(Lua, -2, key.UTF8String);
-          }
-
-          lua_pushboolean(Lua, false);
-          lua_setfield(Lua, -2, CoronaEventIsErrorKey());
-
-          lua_pushstring(Lua, PROVIDER_NAME);
-          lua_setfield(Lua, -2, CoronaEventProviderKey());
-
-          CoronaLuaDispatchEvent(Lua, coronaListener, 0);
-        }];
-      }
-    }];
+  if (! attRequested) {
+    initializeLevelPlay(appKey, fTestMode);
   }
 
   return 0;
@@ -744,7 +744,10 @@ UnityAdsPlugin::isLoaded( lua_State *L )
     return 0;
   }
 
-  bool isLoaded = [loadedIds containsObject:@(placementId)];
+  // Ready means the SDK reported a load and still considers the ad showable
+  // (not shown, not expired, not capped).
+  CoronaAdSlot *slot = slotForAdUnitId(@(placementId));
+  bool isLoaded = (slot != nil && slot.isReady && [slot isAdReady]);
   lua_pushboolean(L, isLoaded);
 
   return 1;
@@ -784,7 +787,7 @@ UnityAdsPlugin::load( lua_State *L )
     return 0;
   }
 
-  NSString *adType = @"interstitial";
+  NSString *adType = AD_TYPE_INTERSTITIAL;
   if (nargs >= 2) {
     if (lua_type(L, 2) == LUA_TSTRING) {
       adType = [NSString stringWithUTF8String:lua_tostring(L, 2)];
@@ -796,20 +799,66 @@ UnityAdsPlugin::load( lua_State *L )
   }
 
   NSString *adUnitId = @(placementId);
+  NSString *requestedType = [adType isEqualToString:AD_TYPE_REWARDED] ? AD_TYPE_REWARDED : AD_TYPE_INTERSTITIAL;
 
-  if ([adType isEqualToString:@"rewarded"]) {
-    LPMRewardedAd *rewardedAd = [[LPMRewardedAd alloc] initWithAdUnitId:adUnitId];
-    CoronaRewardedAdDelegate *delegate = [[CoronaRewardedAdDelegate alloc] initWithAdUnitId:adUnitId];
-    [rewardedAd setDelegate:delegate];
-    adObjects[adUnitId] = @{@"ad": rewardedAd, @"delegate": delegate};
-    [rewardedAd loadAd];
-  } else {
-    LPMInterstitialAd *interstitialAd = [[LPMInterstitialAd alloc] initWithAdUnitId:adUnitId];
-    CoronaInterstitialAdDelegate *delegate = [[CoronaInterstitialAdDelegate alloc] initWithAdUnitId:adUnitId];
-    [interstitialAd setDelegate:delegate];
-    adObjects[adUnitId] = @{@"ad": interstitialAd, @"delegate": delegate};
-    [interstitialAd loadAd];
+  CoronaAdSlot *slot = slotForAdUnitId(adUnitId);
+
+  // An ad unit is either interstitial or rewarded. Rebuild the slot if the caller switched type.
+  if (slot != nil && ! [slot.adType isEqualToString:requestedType]) {
+    logMsg(L, WARNING_MSG, MsgFormat(@"placementId '%s' was loaded as '%@' before, recreating it as '%@'", placementId, slot.adType, requestedType));
+    [adSlots removeObjectForKey:adUnitId];
+    slot = nil;
   }
+
+  if (slot == nil) {
+    slot = [CoronaAdSlot new];
+    slot.adUnitId = adUnitId;
+    slot.adType = requestedType;
+
+    if ([requestedType isEqualToString:AD_TYPE_REWARDED]) {
+      LPMRewardedAd *rewardedAd = [[LPMRewardedAd alloc] initWithAdUnitId:adUnitId];
+      CoronaRewardedAdDelegate *delegate = [[CoronaRewardedAdDelegate alloc] initWithAdUnitId:adUnitId];
+      [rewardedAd setDelegate:delegate];
+      slot.ad = rewardedAd;
+      slot.delegate = delegate;
+    }
+    else {
+      LPMInterstitialAd *interstitialAd = [[LPMInterstitialAd alloc] initWithAdUnitId:adUnitId];
+      CoronaInterstitialAdDelegate *delegate = [[CoronaInterstitialAdDelegate alloc] initWithAdUnitId:adUnitId];
+      [interstitialAd setDelegate:delegate];
+      slot.ad = interstitialAd;
+      slot.delegate = delegate;
+    }
+
+    adSlots[adUnitId] = slot;
+  }
+
+  // The SDK refuses a second loadAd while one is in flight, so answer repeated
+  // calls here instead of forwarding them.
+  if (slot.isLoading) {
+    NSTimeInterval elapsed = [NSDate timeIntervalSinceReferenceDate] - slot.loadStartedAt;
+    if (elapsed < LOAD_STALE_SECONDS) {
+      logMsg(L, WARNING_MSG, MsgFormat(@"placementId '%s' is already loading", placementId));
+      return 0;
+    }
+    logMsg(L, WARNING_MSG, MsgFormat(@"placementId '%s' load did not report back in %.0f seconds, retrying", placementId, elapsed));
+  }
+
+  // A loaded, still showable ad is reported right away instead of requesting another one.
+  if (slot.isReady && [slot isAdReady]) {
+    slot.isLoading = NO;
+    dispatchLuaEvent(@{
+      @(CoronaEventPhaseKey()) : PHASE_LOADED,
+      @(CoronaEventTypeKey()) : @(TYPE_UNITYAD),
+      CORONA_EVENT_DATA_KEY : getJSONStringForPlacement(adUnitId, -1, nil)
+    });
+    return 0;
+  }
+
+  slot.isReady = NO;
+  slot.isLoading = YES;
+  slot.loadStartedAt = [NSDate timeIntervalSinceReferenceDate];
+  [slot loadAd];
 
   return 0;
 }
@@ -848,26 +897,19 @@ UnityAdsPlugin::show( lua_State *L )
     return 0;
   }
 
-  NSString *adUnitId = @(placementId);
+  CoronaAdSlot *slot = slotForAdUnitId(@(placementId));
 
-  if (![loadedIds containsObject:adUnitId]) {
+  if (slot == nil || ! slot.isReady) {
     logMsg(L, WARNING_MSG, MsgFormat(@"placementId '%s' not loaded", placementId));
     return 0;
   }
 
-  NSDictionary *adEntry = adObjects[adUnitId];
-  if (adEntry) {
-    id adObject = adEntry[@"ad"];
-    [[NSOperationQueue mainQueue] addOperationWithBlock:^{
-      if ([adObject isKindOfClass:[LPMInterstitialAd class]]) {
-        [(LPMInterstitialAd *)adObject showAdWithViewController:library.coronaViewController placementName:nil];
-      } else if ([adObject isKindOfClass:[LPMRewardedAd class]]) {
-        [(LPMRewardedAd *)adObject showAdWithViewController:library.coronaViewController placementName:nil];
-      }
-    }];
-  } else {
-    logMsg(L, WARNING_MSG, MsgFormat(@"No ad object found for '%s'", placementId));
-  }
+  // Show on the main queue; an expired or capped ad is reported by the SDK through
+  // didFailToDisplayAdWithAdInfo:error: as a "failed" event.
+  UIViewController *viewController = library.coronaViewController;
+  [[NSOperationQueue mainQueue] addOperationWithBlock:^{
+    [slot showAdWithViewController:viewController];
+  }];
 
   return 0;
 }
@@ -902,7 +944,7 @@ UnityAdsPlugin::setHasUserConsent(lua_State *L)
         return 0;
     }
 
-    [LevelPlay setConsent:(hasUserConsent != 0)];
+    [LPMPrivacySettings setGDPRConsent:(hasUserConsent != 0)];
 
     return 0;
 }
@@ -937,8 +979,9 @@ UnityAdsPlugin::setPersonalizedAds(lua_State *L)
         return 0;
     }
 
-    // In LevelPlay, consent controls personalization
-    [LevelPlay setConsent:(setPersonalizedAds == 0)];
+    // Documented semantics (inherited from the Unity Ads "user.nonbehavioral" flag):
+    // true means the user may NOT receive personalized ads, so GDPR consent is withheld.
+    [LPMPrivacySettings setGDPRConsent:(setPersonalizedAds == 0)];
 
     return 0;
 }
@@ -972,12 +1015,10 @@ UnityAdsPlugin::setPrivacyMode(lua_State *L)
         return 0;
     }
 
-    // Map privacy modes to LevelPlay COPPA setting
-    if ([privacyMode isEqualToString:@"app"] || [privacyMode isEqualToString:@"mixed"]) {
-        [LevelPlay setMetaDataWithKey:@"is_child_directed" value:@"true"];
-    } else {
-        [LevelPlay setMetaDataWithKey:@"is_child_directed" value:@"false"];
-    }
+    // "app" and "mixed" audiences are treated as child directed. LevelPlay requires this
+    // flag before initialization, which matches the documented usage of this function.
+    BOOL childDirected = ([privacyMode isEqualToString:@"app"] || [privacyMode isEqualToString:@"mixed"]);
+    [LPMPrivacySettings setCOPPA:childDirected];
 
     return 0;
 }

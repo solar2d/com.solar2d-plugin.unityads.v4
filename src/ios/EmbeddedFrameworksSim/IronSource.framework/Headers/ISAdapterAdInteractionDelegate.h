@@ -18,16 +18,17 @@ NS_ASSUME_NONNULL_BEGIN
 // Mandatory callbacks
 
 - (void)adDidClose;
+- (void)adDidCloseWithExtraData:(NSDictionary<NSString *, id> *)extraData;
 
 // Optional callbacks
-
-- (void)adDidShowSucceed;
-
 - (void)adDidBecomeVisible;
+- (void)adDidBecomeVisibleWithExtraData:(NSDictionary<NSString *, id> *)extraData;
 
 - (void)adDidStart;
+- (void)adDidStartWithExtraData:(NSDictionary<NSString *, id> *)extraData;
 
 - (void)adDidEnd;
+- (void)adDidEndWithExtraData:(NSDictionary<NSString *, id> *)extraData;
 
 @end
 

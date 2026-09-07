@@ -18,6 +18,11 @@ NS_ASSUME_NONNULL_BEGIN
 typedef void (^LPMInitCompletionHandler)(LPMConfiguration *_Nullable config,
                                          NSError *_Nullable error);
 
+#define LEVEL_PLAY_REWARDED @"rewarded"
+#define LEVEL_PLAY_INTERSTITIAL @"interstitial"
+#define LEVEL_PLAY_BANNER @"banner"
+#define LEVEL_PLAY_NATIVE_AD @"nativead"
+
 @interface LevelPlay : NSObject
 
 - (instancetype)init NS_UNAVAILABLE;
@@ -49,17 +54,50 @@ typedef void (^LPMInitCompletionHandler)(LPMConfiguration *_Nullable config,
  Adds the delegate for impression data callbacks.
 
  @param delegate The delegate for LevelPlay to send callbacks to.
+ @deprecated
+    Publishers: use `setImpressionDataDelegate:` on each `LPMBannerAdView`,
+ `LPMInterstitialAd`, or `LPMRewardedAd`.
+    Third-party SDKs: use
+ `addImpressionLevelRevenueDelegate:forSubscriberId:`.
  */
 
-+ (void)addImpressionDataDelegate:(id<LPMImpressionDataDelegate>)delegate;
++ (void)addImpressionDataDelegate:(id<LPMImpressionDataDelegate>)delegate
+    DEPRECATED_MSG_ATTRIBUTE(
+        "Publishers: use setImpressionDataDelegate: on each LPMBannerAdView, LPMInterstitialAd, "
+        "or LPMRewardedAd.\n"
+        "Third-party SDKs: use addImpressionLevelRevenueDelegate:forSubscriberId:.");
 
 /**
  Removes the delegate from impression data callbacks.
 
  @param delegate The delegate for LevelPlay to send callbacks to.
+ @deprecated
+    Publishers: use `setImpressionDataDelegate:nil` on each `LPMBannerAdView`, `LPMInterstitialAd`,
+ or `LPMRewardedAd`.
+    Third-party SDKs: use `removeImpressionLevelRevenueDelegate:`.
  */
 
-+ (void)removeImpressionDataDelegate:(id<LPMImpressionDataDelegate>)delegate;
++ (void)removeImpressionDataDelegate:(id<LPMImpressionDataDelegate>)delegate
+    DEPRECATED_MSG_ATTRIBUTE(
+        "Publishers: use setImpressionDataDelegate:nil on each LPMBannerAdView, "
+        "LPMInterstitialAd, or LPMRewardedAd.\n"
+        "Third-party SDKs: use removeImpressionLevelRevenueDelegate:.");
+
+/**
+ Adds impression level revenue data delegate callbacks for approved third-party SDKs.
+
+ @param delegate The delegate to receive impression data callbacks.
+ @param subscriberId The identifier as provided by your Unity Partnership Manager.
+ */
++ (void)addImpressionLevelRevenueDelegate:(id<LPMImpressionDataDelegate>)delegate
+                          forSubscriberId:(NSString *)subscriberId;
+
+/**
+ Removes impression level revenue data delegate callbacks.
+
+ @param delegate The delegate to remove from impression data callbacks.
+ */
++ (void)removeImpressionLevelRevenueDelegate:(id<LPMImpressionDataDelegate>)delegate;
 
 /**
 @abstact Sets the meta data with a key and value.
@@ -140,8 +178,11 @@ typedef void (^LPMInitCompletionHandler)(LPMConfiguration *_Nullable config,
  @discussion Sets the consent, boolean value that indicates whether the user has granted consent for
  the SDK to collect and share data. Consent is used for GDPR compliance.
  @param consent value.
+ @deprecated This method is deprecated. Use `+[LPMPrivacySettings.setGDPRConsent:]` instead
+ for GDPR consent management.
  */
-+ (void)setConsent:(BOOL)consent;
++ (void)setConsent:(BOOL)consent __attribute__((deprecated(
+                       "use +[LPMPrivacySettings setGDPRConsent:] for GDPR consent management.")));
 
 @end
 

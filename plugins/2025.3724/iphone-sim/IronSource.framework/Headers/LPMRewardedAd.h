@@ -7,9 +7,10 @@
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
+#import "LPMImpressionDataDelegate.h"
 #import "LPMRewardedAdDelegate.h"
 
-@class LPMRewardedAdConfig;
+@class LPMRewardedAdConfig, LPMReward;
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -51,6 +52,14 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)setDelegate:(id<LPMRewardedAdDelegate>)delegate;
 
 /**
+ Sets a delegate for impression-level revenue data. The callback will be invoked on the main
+ thread when an impression occurs for this specific ad instance.
+
+ @param delegate The delegate to set.
+ */
+- (void)setImpressionDataDelegate:(nullable id<LPMImpressionDataDelegate>)delegate;
+
+/**
  Loads a rewarded ad.
  The delegate will send a `didLoadAdWithAdInfo:` or
  `didFailToLoadAdWithAdUnitId: error:` callback.
@@ -79,6 +88,20 @@ NS_ASSUME_NONNULL_BEGIN
  @return Whether the ad is ready.
  */
 - (BOOL)isAdReady;
+
+/**
+ Retrieves the reward associated with the ad.
+
+ Use this method to obtain the reward configured for the ad unit or placement.
+ The placement-specific reward takes precedence over the ad unit reward when a valid placement name
+ is provided.
+
+ @param placement The placement name to retrieve the reward for, or `nil` to use the ad unit's
+ reward.
+ @return A `LPMReward` object. Returns an empty reward on failures (`name: ""` and `amount: 0`).
+ */
+- (LPMReward *)getRewardWithPlacementName:(nullable NSString *)placement
+    NS_SWIFT_NAME(getReward(placementName:));
 
 /**
  Checks if the placement is capped.

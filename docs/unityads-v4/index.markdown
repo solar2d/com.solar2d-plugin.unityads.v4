@@ -26,6 +26,13 @@ See more at [Unity Ads GDPR Compliance doc page](https://unityads.unity3d.com/he
 </div>
 
 
+<div class="guide-notebox">
+<div class="notebox-title">LevelPlay backend</div>
+
+Since plugin version 2.0 the plugin is implemented on top of the Unity LevelPlay (ironSource) mediation SDK. The Lua API is unchanged, but the identifiers come from the LevelPlay dashboard: pass your LevelPlay __App Key__ as `gameId` to [unityads.init()][plugin.unityads-v4.init], and use LevelPlay __Ad Unit IDs__ as placement IDs. Rewarded ad units must be loaded with `unityads.load( adUnitId, "rewarded" )`.
+
+</div>
+
 ## Registration
 
 Before you can use this plugin, you must [register](https://unity3d.com/services/ads) with Unity&nbsp;Ads.
@@ -78,7 +85,7 @@ settings =
 	},
 	android =
 	{
-		minSdkVersion = "19",
+		minSdkVersion = "23",
 	},
 	plugins =
 	{
@@ -105,7 +112,7 @@ For Android, the following permissions/features are automatically added when usi
 * `"android.permission.INTERNET"`
 * `"android.permission.ACCESS_NETWORK_STATE"`
 
-Also, minimum Android API level required is 19
+Also, minimum Android API level required is 23 (LevelPlay SDK requirement)
 
 </div>
 

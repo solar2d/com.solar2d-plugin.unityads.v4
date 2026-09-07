@@ -4,6 +4,7 @@
 
 package plugin.unityads.v4;
 
+import android.os.SystemClock;
 import android.util.Log;
 
 import com.ansca.corona.CoronaActivity;
@@ -26,6 +27,7 @@ import com.unity3d.mediation.LevelPlayConfiguration;
 import com.unity3d.mediation.LevelPlayInitError;
 import com.unity3d.mediation.LevelPlayInitListener;
 import com.unity3d.mediation.LevelPlayInitRequest;
+import com.unity3d.mediation.LevelPlayPrivacySettings;
 import com.unity3d.mediation.interstitial.LevelPlayInterstitialAd;
 import com.unity3d.mediation.interstitial.LevelPlayInterstitialAdListener;
 import com.unity3d.mediation.rewarded.LevelPlayReward;
@@ -35,9 +37,8 @@ import com.unity3d.mediation.rewarded.LevelPlayRewardedAdListener;
 import org.json.JSONObject;
 
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.Map;
-import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Implements the Lua interface for the UnityAds plugin.
@@ -48,13 +49,17 @@ import java.util.Set;
 @SuppressWarnings({"unused", "RedundantSuppression"})
 public class LuaLoader implements JavaFunction, CoronaRuntimeListener {
     private static final String PLUGIN_NAME = "plugin.unityads.v4";
-    private static final String PLUGIN_VERSION = "2.0.0";
+    private static final String PLUGIN_VERSION = "2.1.0";
 
     private static final String EVENT_NAME = "adsRequest";
     private static final String PROVIDER_NAME = "unityads";
 
     // event types
     private static final String TYPE_UNITYAD = "unityAd";
+
+    // ad formats accepted by unityads.load()
+    private static final String AD_TYPE_INTERSTITIAL = "interstitial";
+    private static final String AD_TYPE_REWARDED = "rewarded";
 
     // data keys
     private static final String DATA_PLACEMENT_ID_KEY = "placementId";
@@ -75,6 +80,10 @@ public class LuaLoader implements JavaFunction, CoronaRuntimeListener {
     private static final String PHASE_CLICKED = "clicked";
     private static final String PHASE_LOADED = "loaded";
 
+    // A load that has not reported back after this long is treated as abandoned, so a
+    // later unityads.load() is forwarded to the SDK again instead of being dropped.
+    private static final long LOAD_STALE_MS = 120_000L;
+
     private static int coronaListener = CoronaLua.REFNIL;
     private static CoronaRuntimeTaskDispatcher coronaRuntimeTaskDispatcher = null;
 
@@ -84,14 +93,64 @@ public class LuaLoader implements JavaFunction, CoronaRuntimeListener {
     private static final String WARNING_MSG = "WARNING: ";
 
     private static String functionSignature = "";
-    // Store ad objects keyed by adUnitId
-    private static final Map<String, Object> adObjects = new HashMap<>();
-    // Track which ad unit IDs are loaded and ready
-    private static final Set<String> loadedIds = new HashSet<>();
-    // Track which ad unit IDs received a reward (for skipped vs completed)
-    private static final Set<String> rewardedIds = new HashSet<>();
-    private static boolean fInitSuccess = false;
-    private static boolean fInitStarted = false;
+
+    // One persistent LevelPlay ad object per ad unit, keyed by adUnitId (see AdSlot)
+    private static final Map<String, AdSlot> adSlots = new ConcurrentHashMap<>();
+    private static volatile boolean fInitSuccess = false;
+    private static volatile boolean fInitStarted = false;
+
+    // -------------------------------------------------------------------
+    // Ad slot
+    // -------------------------------------------------------------------
+    //
+    // LevelPlay documents LevelPlayInterstitialAd / LevelPlayRewardedAd as reusable
+    // instances that handle every load and show for an ad unit during the session.
+    // Earlier versions of this plugin created a fresh ad object on every unityads.load()
+    // call and dropped it after each close or failure, so apps that call load()
+    // repeatedly fanned out into several concurrent SDK loads. A slot keeps exactly one
+    // ad object per ad unit instead. Slot state is only mutated on the UI thread (load,
+    // show and every SDK callback run there); the Lua thread only reads it.
+    private static class AdSlot {
+        final String adUnitId;
+        final String adType;        // AD_TYPE_INTERSTITIAL or AD_TYPE_REWARDED
+        final Object ad;            // LevelPlayInterstitialAd or LevelPlayRewardedAd
+        volatile boolean isLoading;    // a loadAd call is in flight
+        volatile long loadStartedAt;   // SystemClock.elapsedRealtime() when loadAd was called
+        volatile boolean isReady;      // onAdLoaded received and the ad has not been shown yet
+        volatile boolean rewardEarned; // rewarded only: onAdRewarded received during the current show
+
+        AdSlot(String adUnitId, String adType, Object ad) {
+            this.adUnitId = adUnitId;
+            this.adType = adType;
+            this.ad = ad;
+        }
+
+        boolean isAdReady() {
+            if (ad instanceof LevelPlayInterstitialAd) {
+                return ((LevelPlayInterstitialAd) ad).isAdReady();
+            }
+            if (ad instanceof LevelPlayRewardedAd) {
+                return ((LevelPlayRewardedAd) ad).isAdReady();
+            }
+            return false;
+        }
+
+        void loadAd() {
+            if (ad instanceof LevelPlayInterstitialAd) {
+                ((LevelPlayInterstitialAd) ad).loadAd();
+            } else if (ad instanceof LevelPlayRewardedAd) {
+                ((LevelPlayRewardedAd) ad).loadAd();
+            }
+        }
+
+        void showAd(CoronaActivity activity) {
+            if (ad instanceof LevelPlayInterstitialAd) {
+                ((LevelPlayInterstitialAd) ad).showAd(activity);
+            } else if (ad instanceof LevelPlayRewardedAd) {
+                ((LevelPlayRewardedAd) ad).showAd(activity);
+            }
+        }
+    }
 
     // -------------------------------------------------------------------
     // Plugin lifecycle events
@@ -138,9 +197,7 @@ public class LuaLoader implements JavaFunction, CoronaRuntimeListener {
 
     @Override
     public void onExiting(CoronaRuntime runtime) {
-        adObjects.clear();
-        loadedIds.clear();
-        rewardedIds.clear();
+        adSlots.clear();
         CoronaLua.deleteRef(runtime.getLuaState(), coronaListener);
         coronaListener = CoronaLua.REFNIL;
         coronaRuntimeTaskDispatcher = null;
@@ -164,12 +221,26 @@ public class LuaLoader implements JavaFunction, CoronaRuntimeListener {
         return fInitSuccess;
     }
 
+    // Like isSDKInitialized(), but tells the developer why the call is being ignored.
+    // isLoaded() stays silent because apps commonly poll it while init is still running.
+    private boolean isSDKInitializedOrWarn() {
+        if (!fInitSuccess) {
+            logMsg(WARNING_MSG, "unityads.init() has not completed successfully yet");
+            return false;
+        }
+        return true;
+    }
+
     private void dispatchLuaEvent(final Map<String, Object> event) {
         if (coronaRuntimeTaskDispatcher != null) {
             coronaRuntimeTaskDispatcher.send(new CoronaRuntimeTask() {
                 @Override
                 public void executeUsing(CoronaRuntime runtime) {
                     try {
+                        if (coronaListener == CoronaLua.REFNIL) {
+                            return;
+                        }
+
                         LuaState L = runtime.getLuaState();
                         CoronaLua.newEvent(L, EVENT_NAME);
                         boolean hasErrorKey = false;
@@ -220,6 +291,103 @@ public class LuaLoader implements JavaFunction, CoronaRuntimeListener {
         return data.toString();
     }
 
+    private Map<String, Object> adEvent(String phase, String adUnitId) {
+        Map<String, Object> coronaEvent = new HashMap<>();
+        coronaEvent.put(EVENT_PHASE_KEY, phase);
+        coronaEvent.put(EVENT_TYPE_KEY, TYPE_UNITYAD);
+        coronaEvent.put(EVENT_DATA_KEY, getJSONStringForPlacement(adUnitId));
+        return coronaEvent;
+    }
+
+    private Map<String, Object> failedEvent(String adUnitId, LevelPlayAdError error, String fallbackMsg) {
+        int errorCode = (error != null) ? error.getErrorCode() : -1;
+        String errorMsg = (error != null && error.getErrorMessage() != null) ? error.getErrorMessage() : fallbackMsg;
+
+        Map<String, Object> coronaEvent = new HashMap<>();
+        coronaEvent.put(EVENT_PHASE_KEY, PHASE_FAILED);
+        coronaEvent.put(EVENT_TYPE_KEY, TYPE_UNITYAD);
+        coronaEvent.put(CoronaLuaEvent.ISERROR_KEY, true);
+        coronaEvent.put(CoronaLuaEvent.RESPONSE_KEY, errorMsg);
+        coronaEvent.put(EVENT_DATA_KEY, getJSONStringForPlacement(adUnitId, errorCode, errorMsg));
+        return coronaEvent;
+    }
+
+    // Runs on the UI thread. Creates the slot for an ad unit on first use and forwards
+    // the load to the SDK unless one is already in flight or an ad is already waiting.
+    private void loadOnUiThread(String adUnitId, String requestedType) {
+        AdSlot slot = adSlots.get(adUnitId);
+
+        // An ad unit is either interstitial or rewarded. Rebuild the slot if the caller switched type.
+        if (slot != null && !slot.adType.equals(requestedType)) {
+            logMsg(WARNING_MSG, "placementId '" + adUnitId + "' was loaded as '" + slot.adType
+                    + "' before, recreating it as '" + requestedType + "'");
+            adSlots.remove(adUnitId);
+            slot = null;
+        }
+
+        if (slot == null) {
+            Object ad;
+            if (requestedType.equals(AD_TYPE_REWARDED)) {
+                LevelPlayRewardedAd rewardedAd = new LevelPlayRewardedAd(adUnitId);
+                rewardedAd.setListener(new RewardedAdListener(adUnitId));
+                ad = rewardedAd;
+            } else {
+                LevelPlayInterstitialAd interstitialAd = new LevelPlayInterstitialAd(adUnitId);
+                interstitialAd.setListener(new InterstitialAdListener(adUnitId));
+                ad = interstitialAd;
+            }
+            slot = new AdSlot(adUnitId, requestedType, ad);
+            adSlots.put(adUnitId, slot);
+        }
+
+        // The SDK answers a second loadAd while one is in flight with error 627, so
+        // repeated calls are answered here instead of being forwarded.
+        if (slot.isLoading) {
+            long elapsed = SystemClock.elapsedRealtime() - slot.loadStartedAt;
+            if (elapsed < LOAD_STALE_MS) {
+                logMsg(WARNING_MSG, "placementId '" + adUnitId + "' is already loading");
+                return;
+            }
+            logMsg(WARNING_MSG, "placementId '" + adUnitId + "' load did not report back in "
+                    + (elapsed / 1000) + " seconds, retrying");
+        }
+
+        // A loaded, still showable ad is reported right away instead of requesting another one.
+        if (slot.isReady && slot.isAdReady()) {
+            slot.isLoading = false;
+            dispatchLuaEvent(adEvent(PHASE_LOADED, adUnitId));
+            return;
+        }
+
+        slot.isLoading = true;
+        slot.loadStartedAt = SystemClock.elapsedRealtime();
+        slot.loadAd();
+    }
+
+    // Shared by both listeners: a load failure, with the "load already called" case
+    // (error 627) mapped back to a loaded event when the SDK still holds a showable ad.
+    private void handleLoadFailed(String adUnitId, LevelPlayAdError error) {
+        AdSlot slot = adSlots.get(adUnitId);
+
+        if (slot != null) {
+            slot.isLoading = false;
+
+            if (error != null
+                    && error.getErrorCode() == LevelPlayAdError.ERROR_CODE_LOAD_FAILED_ALREADY_CALLED
+                    && slot.isAdReady()) {
+                slot.isReady = true;
+                dispatchLuaEvent(adEvent(PHASE_LOADED, adUnitId));
+                return;
+            }
+
+            if (error == null || error.getErrorCode() != LevelPlayAdError.ERROR_CODE_LOAD_FAILED_ALREADY_CALLED) {
+                slot.isReady = false;
+            }
+        }
+
+        dispatchLuaEvent(failedEvent(adUnitId, error, "Load failed"));
+    }
+
     // -------------------------------------------------------------------
     // Plugin implementation
     // -------------------------------------------------------------------
@@ -233,7 +401,7 @@ public class LuaLoader implements JavaFunction, CoronaRuntimeListener {
 
         @Override
         public int invoke(final LuaState luaState) {
-            synchronized (adObjects) {
+            synchronized (adSlots) {
                 if (fInitStarted) {
                     logMsg(ERROR_MSG, "init() should only be called once");
                     return 0;
@@ -293,7 +461,7 @@ public class LuaLoader implements JavaFunction, CoronaRuntimeListener {
                     return 0;
                 }
 
-                Log.i(CORONA_TAG, PLUGIN_NAME + ": " + PLUGIN_VERSION + " (LevelPlay)");
+                Log.i(CORONA_TAG, PLUGIN_NAME + ": " + PLUGIN_VERSION + " (LevelPlay SDK " + LevelPlay.getSdkVersion() + ")");
 
                 final CoronaActivity coronaActivity = CoronaEnvironment.getCoronaActivity();
                 final String fGameId = gameId;
@@ -375,7 +543,10 @@ public class LuaLoader implements JavaFunction, CoronaRuntimeListener {
                 return 0;
             }
 
-            boolean isLoaded = loadedIds.contains(placementId);
+            // Ready means the SDK reported a load and still considers the ad showable
+            // (not shown, not expired, not capped).
+            AdSlot slot = adSlots.get(placementId);
+            boolean isLoaded = (slot != null && slot.isReady && slot.isAdReady());
             luaState.pushBoolean(isLoaded);
             return 1;
         }
@@ -392,7 +563,7 @@ public class LuaLoader implements JavaFunction, CoronaRuntimeListener {
         public int invoke(LuaState luaState) {
             functionSignature = "unityads.load(placementId [, adType])";
 
-            if (!isSDKInitialized()) {
+            if (!isSDKInitializedOrWarn()) {
                 return 0;
             }
 
@@ -410,7 +581,7 @@ public class LuaLoader implements JavaFunction, CoronaRuntimeListener {
                 return 0;
             }
 
-            String adType = "interstitial";
+            String adType = AD_TYPE_INTERSTITIAL;
             if (nargs >= 2) {
                 if (luaState.type(2) == LuaType.STRING) {
                     adType = luaState.toString(2);
@@ -422,23 +593,13 @@ public class LuaLoader implements JavaFunction, CoronaRuntimeListener {
 
             final CoronaActivity coronaActivity = CoronaEnvironment.getCoronaActivity();
             final String fPlacementId = placementId;
-            final String fAdType = adType;
+            final String fAdType = adType.equals(AD_TYPE_REWARDED) ? AD_TYPE_REWARDED : AD_TYPE_INTERSTITIAL;
 
             if (coronaActivity != null) {
                 coronaActivity.runOnUiThread(new Runnable() {
                     @Override
                     public void run() {
-                        if (fAdType.equals("rewarded")) {
-                            LevelPlayRewardedAd rewardedAd = new LevelPlayRewardedAd(fPlacementId);
-                            rewardedAd.setListener(new RewardedAdListener(fPlacementId));
-                            adObjects.put(fPlacementId, rewardedAd);
-                            rewardedAd.loadAd();
-                        } else {
-                            LevelPlayInterstitialAd interstitialAd = new LevelPlayInterstitialAd(fPlacementId);
-                            interstitialAd.setListener(new InterstitialAdListener(fPlacementId));
-                            adObjects.put(fPlacementId, interstitialAd);
-                            interstitialAd.loadAd();
-                        }
+                        loadOnUiThread(fPlacementId, fAdType);
                     }
                 });
             }
@@ -458,7 +619,7 @@ public class LuaLoader implements JavaFunction, CoronaRuntimeListener {
         public int invoke(LuaState luaState) {
             functionSignature = "unityads.show(placementId)";
 
-            if (!isSDKInitialized()) {
+            if (!isSDKInitializedOrWarn()) {
                 return 0;
             }
 
@@ -476,26 +637,20 @@ public class LuaLoader implements JavaFunction, CoronaRuntimeListener {
                 return 0;
             }
 
-            if (!loadedIds.contains(placementId)) {
+            final AdSlot slot = adSlots.get(placementId);
+            if (slot == null || !slot.isReady) {
                 logMsg(WARNING_MSG, "placementId '" + placementId + "' not loaded");
                 return 0;
             }
 
             final CoronaActivity coronaActivity = CoronaEnvironment.getCoronaActivity();
-            final String fPlacementId = placementId;
 
             if (coronaActivity != null) {
+                // An expired or capped ad is reported by the SDK through onAdDisplayFailed as a "failed" event.
                 coronaActivity.runOnUiThread(new Runnable() {
                     @Override
                     public void run() {
-                        Object adObject = adObjects.get(fPlacementId);
-                        if (adObject instanceof LevelPlayInterstitialAd) {
-                            ((LevelPlayInterstitialAd) adObject).showAd(coronaActivity);
-                        } else if (adObject instanceof LevelPlayRewardedAd) {
-                            ((LevelPlayRewardedAd) adObject).showAd(coronaActivity);
-                        } else {
-                            logMsg(WARNING_MSG, "No ad object found for '" + fPlacementId + "'");
-                        }
+                        slot.showAd(coronaActivity);
                     }
                 });
             }
@@ -529,7 +684,7 @@ public class LuaLoader implements JavaFunction, CoronaRuntimeListener {
                 return 0;
             }
 
-            LevelPlay.setConsent(hasUserConsent);
+            LevelPlayPrivacySettings.setGDPRConsent(hasUserConsent);
 
             return 0;
         }
@@ -560,8 +715,9 @@ public class LuaLoader implements JavaFunction, CoronaRuntimeListener {
                 return 0;
             }
 
-            // In LevelPlay, consent controls personalization
-            LevelPlay.setConsent(!setPersonalizedAds);
+            // Documented semantics (inherited from the Unity Ads "user.nonbehavioral" flag):
+            // true means the user may NOT receive personalized ads, so GDPR consent is withheld.
+            LevelPlayPrivacySettings.setGDPRConsent(!setPersonalizedAds);
 
             return 0;
         }
@@ -592,21 +748,17 @@ public class LuaLoader implements JavaFunction, CoronaRuntimeListener {
                 return 0;
             }
 
-            // Map privacy modes to LevelPlay COPPA setting
-            if (privacyMode.equals("app")) {
-                LevelPlay.setMetaData("is_child_directed", "true");
-            } else if (privacyMode.equals("mixed")) {
-                LevelPlay.setMetaData("is_child_directed", "true");
-            } else {
-                LevelPlay.setMetaData("is_child_directed", "false");
-            }
+            // "app" and "mixed" audiences are treated as child directed. LevelPlay requires this
+            // flag before initialization, which matches the documented usage of this function.
+            boolean childDirected = privacyMode.equals("app") || privacyMode.equals("mixed");
+            LevelPlayPrivacySettings.setCOPPA(childDirected);
 
             return 0;
         }
     }
 
     // -------------------------------------------------------------------
-    // LevelPlay Ad Listeners
+    // LevelPlay Ad Listeners (callbacks arrive on the UI thread)
     // -------------------------------------------------------------------
 
     private class InterstitialAdListener implements LevelPlayInterstitialAdListener {
@@ -618,69 +770,46 @@ public class LuaLoader implements JavaFunction, CoronaRuntimeListener {
 
         @Override
         public void onAdLoaded(LevelPlayAdInfo adInfo) {
-            loadedIds.add(adUnitId);
-            Map<String, Object> coronaEvent = new HashMap<>();
-            coronaEvent.put(EVENT_PHASE_KEY, PHASE_LOADED);
-            coronaEvent.put(EVENT_TYPE_KEY, TYPE_UNITYAD);
-            coronaEvent.put(EVENT_DATA_KEY, getJSONStringForPlacement(adUnitId));
-            dispatchLuaEvent(coronaEvent);
+            AdSlot slot = adSlots.get(adUnitId);
+            if (slot != null) {
+                slot.isLoading = false;
+                slot.isReady = true;
+            }
+            dispatchLuaEvent(adEvent(PHASE_LOADED, adUnitId));
         }
 
         @Override
         public void onAdLoadFailed(LevelPlayAdError error) {
-            loadedIds.remove(adUnitId);
-            adObjects.remove(adUnitId);
-            Map<String, Object> coronaEvent = new HashMap<>();
-            coronaEvent.put(EVENT_PHASE_KEY, PHASE_FAILED);
-            coronaEvent.put(EVENT_TYPE_KEY, TYPE_UNITYAD);
-            coronaEvent.put(CoronaLuaEvent.ISERROR_KEY, true);
-            coronaEvent.put(CoronaLuaEvent.RESPONSE_KEY, error.getErrorMessage());
-            coronaEvent.put(EVENT_DATA_KEY, getJSONStringForPlacement(adUnitId,
-                    error.getErrorCode(), error.getErrorMessage()));
-            dispatchLuaEvent(coronaEvent);
+            handleLoadFailed(adUnitId, error);
         }
 
         @Override
         public void onAdDisplayed(LevelPlayAdInfo adInfo) {
-            loadedIds.remove(adUnitId);
-            Map<String, Object> coronaEvent = new HashMap<>();
-            coronaEvent.put(EVENT_PHASE_KEY, PHASE_DISPLAYED);
-            coronaEvent.put(EVENT_TYPE_KEY, TYPE_UNITYAD);
-            coronaEvent.put(EVENT_DATA_KEY, getJSONStringForPlacement(adUnitId));
-            dispatchLuaEvent(coronaEvent);
+            AdSlot slot = adSlots.get(adUnitId);
+            if (slot != null) {
+                slot.isReady = false;
+            }
+            dispatchLuaEvent(adEvent(PHASE_DISPLAYED, adUnitId));
         }
 
         @Override
         public void onAdDisplayFailed(LevelPlayAdError error, LevelPlayAdInfo adInfo) {
-            loadedIds.remove(adUnitId);
-            adObjects.remove(adUnitId);
-            Map<String, Object> coronaEvent = new HashMap<>();
-            coronaEvent.put(EVENT_PHASE_KEY, PHASE_FAILED);
-            coronaEvent.put(EVENT_TYPE_KEY, TYPE_UNITYAD);
-            coronaEvent.put(CoronaLuaEvent.ISERROR_KEY, true);
-            coronaEvent.put(CoronaLuaEvent.RESPONSE_KEY, error.getErrorMessage());
-            coronaEvent.put(EVENT_DATA_KEY, getJSONStringForPlacement(adUnitId,
-                    error.getErrorCode(), error.getErrorMessage()));
-            dispatchLuaEvent(coronaEvent);
+            AdSlot slot = adSlots.get(adUnitId);
+            if (slot != null) {
+                slot.isReady = false;
+            }
+            dispatchLuaEvent(failedEvent(adUnitId, error, "Display failed"));
         }
 
         @Override
         public void onAdClicked(LevelPlayAdInfo adInfo) {
-            Map<String, Object> coronaEvent = new HashMap<>();
-            coronaEvent.put(EVENT_PHASE_KEY, PHASE_CLICKED);
-            coronaEvent.put(EVENT_TYPE_KEY, TYPE_UNITYAD);
-            coronaEvent.put(EVENT_DATA_KEY, getJSONStringForPlacement(adUnitId));
-            dispatchLuaEvent(coronaEvent);
+            dispatchLuaEvent(adEvent(PHASE_CLICKED, adUnitId));
         }
 
         @Override
         public void onAdClosed(LevelPlayAdInfo adInfo) {
-            adObjects.remove(adUnitId);
-            Map<String, Object> coronaEvent = new HashMap<>();
-            coronaEvent.put(EVENT_PHASE_KEY, PHASE_COMPLETED);
-            coronaEvent.put(EVENT_TYPE_KEY, TYPE_UNITYAD);
-            coronaEvent.put(EVENT_DATA_KEY, getJSONStringForPlacement(adUnitId));
-            dispatchLuaEvent(coronaEvent);
+            // The ad object stays in its slot; the next unityads.load() reuses it.
+            dispatchLuaEvent(adEvent(PHASE_COMPLETED, adUnitId));
         }
 
         @Override
@@ -698,83 +827,63 @@ public class LuaLoader implements JavaFunction, CoronaRuntimeListener {
 
         @Override
         public void onAdLoaded(LevelPlayAdInfo adInfo) {
-            loadedIds.add(adUnitId);
-            Map<String, Object> coronaEvent = new HashMap<>();
-            coronaEvent.put(EVENT_PHASE_KEY, PHASE_LOADED);
-            coronaEvent.put(EVENT_TYPE_KEY, TYPE_UNITYAD);
-            coronaEvent.put(EVENT_DATA_KEY, getJSONStringForPlacement(adUnitId));
-            dispatchLuaEvent(coronaEvent);
+            AdSlot slot = adSlots.get(adUnitId);
+            if (slot != null) {
+                slot.isLoading = false;
+                slot.isReady = true;
+            }
+            dispatchLuaEvent(adEvent(PHASE_LOADED, adUnitId));
         }
 
         @Override
         public void onAdLoadFailed(LevelPlayAdError error) {
-            loadedIds.remove(adUnitId);
-            adObjects.remove(adUnitId);
-            Map<String, Object> coronaEvent = new HashMap<>();
-            coronaEvent.put(EVENT_PHASE_KEY, PHASE_FAILED);
-            coronaEvent.put(EVENT_TYPE_KEY, TYPE_UNITYAD);
-            coronaEvent.put(CoronaLuaEvent.ISERROR_KEY, true);
-            coronaEvent.put(CoronaLuaEvent.RESPONSE_KEY, error.getErrorMessage());
-            coronaEvent.put(EVENT_DATA_KEY, getJSONStringForPlacement(adUnitId,
-                    error.getErrorCode(), error.getErrorMessage()));
-            dispatchLuaEvent(coronaEvent);
+            handleLoadFailed(adUnitId, error);
         }
 
         @Override
         public void onAdDisplayed(LevelPlayAdInfo adInfo) {
-            loadedIds.remove(adUnitId);
-            rewardedIds.remove(adUnitId);
-            Map<String, Object> coronaEvent = new HashMap<>();
-            coronaEvent.put(EVENT_PHASE_KEY, PHASE_DISPLAYED);
-            coronaEvent.put(EVENT_TYPE_KEY, TYPE_UNITYAD);
-            coronaEvent.put(EVENT_DATA_KEY, getJSONStringForPlacement(adUnitId));
-            dispatchLuaEvent(coronaEvent);
+            AdSlot slot = adSlots.get(adUnitId);
+            if (slot != null) {
+                slot.isReady = false;
+                slot.rewardEarned = false;
+            }
+            dispatchLuaEvent(adEvent(PHASE_DISPLAYED, adUnitId));
         }
 
         @Override
         public void onAdDisplayFailed(LevelPlayAdError error, LevelPlayAdInfo adInfo) {
-            loadedIds.remove(adUnitId);
-            adObjects.remove(adUnitId);
-            Map<String, Object> coronaEvent = new HashMap<>();
-            coronaEvent.put(EVENT_PHASE_KEY, PHASE_FAILED);
-            coronaEvent.put(EVENT_TYPE_KEY, TYPE_UNITYAD);
-            coronaEvent.put(CoronaLuaEvent.ISERROR_KEY, true);
-            coronaEvent.put(CoronaLuaEvent.RESPONSE_KEY, error.getErrorMessage());
-            coronaEvent.put(EVENT_DATA_KEY, getJSONStringForPlacement(adUnitId,
-                    error.getErrorCode(), error.getErrorMessage()));
-            dispatchLuaEvent(coronaEvent);
+            AdSlot slot = adSlots.get(adUnitId);
+            if (slot != null) {
+                slot.isReady = false;
+            }
+            dispatchLuaEvent(failedEvent(adUnitId, error, "Display failed"));
         }
 
         @Override
         public void onAdClicked(LevelPlayAdInfo adInfo) {
-            Map<String, Object> coronaEvent = new HashMap<>();
-            coronaEvent.put(EVENT_PHASE_KEY, PHASE_CLICKED);
-            coronaEvent.put(EVENT_TYPE_KEY, TYPE_UNITYAD);
-            coronaEvent.put(EVENT_DATA_KEY, getJSONStringForPlacement(adUnitId));
-            dispatchLuaEvent(coronaEvent);
+            dispatchLuaEvent(adEvent(PHASE_CLICKED, adUnitId));
         }
 
         @Override
         public void onAdRewarded(LevelPlayReward reward, LevelPlayAdInfo adInfo) {
-            rewardedIds.add(adUnitId);
+            AdSlot slot = adSlots.get(adUnitId);
+            if (slot != null) {
+                slot.rewardEarned = true;
+            }
         }
 
         @Override
         public void onAdClosed(LevelPlayAdInfo adInfo) {
-            adObjects.remove(adUnitId);
-            Map<String, Object> coronaEvent = new HashMap<>();
-            coronaEvent.put(EVENT_TYPE_KEY, TYPE_UNITYAD);
-            coronaEvent.put(EVENT_DATA_KEY, getJSONStringForPlacement(adUnitId));
+            AdSlot slot = adSlots.get(adUnitId);
 
-            // If reward was received, it's completed; otherwise skipped
-            if (rewardedIds.contains(adUnitId)) {
-                coronaEvent.put(EVENT_PHASE_KEY, PHASE_COMPLETED);
-                rewardedIds.remove(adUnitId);
-            } else {
-                coronaEvent.put(EVENT_PHASE_KEY, PHASE_SKIPPED);
+            // If a reward was received the ad was completed; otherwise it was skipped
+            boolean rewarded = (slot != null && slot.rewardEarned);
+            if (slot != null) {
+                slot.rewardEarned = false;
             }
 
-            dispatchLuaEvent(coronaEvent);
+            // The ad object stays in its slot; the next unityads.load() reuses it.
+            dispatchLuaEvent(adEvent(rewarded ? PHASE_COMPLETED : PHASE_SKIPPED, adUnitId));
         }
 
         @Override
